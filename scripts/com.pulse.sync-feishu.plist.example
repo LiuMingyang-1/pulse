@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent that runs sync-feishu.mjs every 5 min on a Mac.
+
+  Install:
+    cp scripts/com.pulse.sync-feishu.plist.example ~/Library/LaunchAgents/com.pulse.sync-feishu.plist
+    # edit the copied file: fix NODE path, repo path, PULSE_URL, PULSE_TOKEN,
+    # LARK_APP_TOKEN, LARK_TABLE_ID
+    launchctl load ~/Library/LaunchAgents/com.pulse.sync-feishu.plist
+
+  Find your node path with: which node
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.pulse.sync-feishu</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/PATH/TO/node</string>
+		<string>/PATH/TO/pulse/scripts/sync-feishu.mjs</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/PATH/TO/node/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<key>PULSE_URL</key>
+		<string>https://pulse.YOUR-SUBDOMAIN.workers.dev</string>
+		<key>PULSE_TOKEN</key>
+		<string>REPLACE_WITH_AGENT_TOKEN</string>
+		<key>LARK_APP_TOKEN</key>
+		<string>REPLACE_WITH_LARK_APP_TOKEN</string>
+		<key>LARK_TABLE_ID</key>
+		<string>REPLACE_WITH_LARK_TABLE_ID</string>
+	</dict>
+	<key>StartInterval</key>
+	<integer>300</integer>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/tmp/pulse-sync-feishu.log</string>
+	<key>StandardErrorPath</key>
+	<string>/tmp/pulse-sync-feishu.log</string>
+</dict>
+</plist>

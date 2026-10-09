@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+.astro/
+logs/
+.alma-snapshots
+# private seed data — use seed.example.sql for the repo version
+seed.sql
+# local launchd config — use scripts/com.pulse.sync-feishu.plist.example
+scripts/com.pulse.sync-feishu.plist

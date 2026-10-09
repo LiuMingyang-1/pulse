@@ -1,0 +1,150 @@
+---
+import Layout from '../layouts/Layout.astro';
+---
+
+<Layout>
+  <div class="shell">
+    <!-- Hark-style floating top bar: round button · pill · avatar -->
+    <header class="topbar">
+      <button id="refresh" class="glass round" aria-label="刷新">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></svg>
+      </button>
+      <nav class="glass pill">
+        <span class="seg active">首页</span>
+        <span class="seg">聊天</span>
+        <span class="seg">项目</span>
+      </nav>
+      <div class="avatar" aria-hidden="true">P</div>
+    </header>
+
+    <main>
+      <hgroup class="hello">
+        <h1 id="greeting" class="greeting"></h1>
+        <p id="clock" class="date"></p>
+      </hgroup>
+      <div id="cards" class="cards"></div>
+    </main>
+  </div>
+
+  <script>
+    import { registry } from '../widgets/registry';
+    import { generic } from '../widgets/generic';
+    import { esc, timeAgo } from '../widgets/ui';
+    import type { Widget, WidgetDef } from '../widgets/types';
+
+    const cardsEl = document.getElementById('cards')!;
+    const known = new Map(registry.map((d) => [d.id, d]));
+
+    const defFor = (id: string, title?: string): WidgetDef =>
+      known.get(id) ?? { ...generic, id, title: title ?? id };
+
+    // Get-or-create the card shell for a widget; body/stamp filled by caller.
+    function cardFor(def: WidgetDef): HTMLElement {
+      let card = cardsEl.querySelector<HTMLElement>(`[data-widget="${CSS.escape(def.id)}"]`);
+      if (card) return card;
+      card = document.createElement('section');
+      card.className = 'card';
+      card.dataset.widget = def.id;
+      card.innerHTML = `
+        <header class="card-head">
+          <span class="card-icon">${def.icon}</span>
+          <h2 class="card-title">${esc(def.title)}</h2>
+          <span class="card-time" data-role="updated"></span>
+        </header>
+        <div class="card-body" data-role="body"><div class="skeleton"><i></i><i></i></div></div>`;
+      cardsEl.append(card);
+      sizer.observe(card);
+      return card;
+    }
+
+    // Desktop masonry: span = card height + 20px gap, in 4px grid rows (see global.css).
+    const desktop = matchMedia('(min-width: 760px)');
+    const sizer = new ResizeObserver((entries) => {
+      for (const { target } of entries) {
+        const el = target as HTMLElement;
+        el.style.gridRowEnd = desktop.matches ? `span ${Math.ceil((el.offsetHeight + 20) / 4)}` : '';
+      }
+    });
+    desktop.addEventListener('change', () =>
+      cardsEl.querySelectorAll<HTMLElement>('.card').forEach((c) => {
+        sizer.unobserve(c);
+        sizer.observe(c);
+      }),
+    );
+
+    registry.forEach(cardFor);
+
+    function paint(def: WidgetDef, w: Widget | undefined) {
+      const card = cardFor(def);
+      card.querySelector('.card-title')!.textContent = w?.title || def.title;
+      card.querySelector('[data-role="updated"]')!.textContent = w ? timeAgo(w.updated_at) : '';
+      let html: string;
+      try {
+        html = def.render(w ? w.data : null);
+      } catch {
+        html = generic.render(w?.data ?? null); // a broken renderer shouldn't blank the card
+      }
+      const body = card.querySelector<HTMLElement>('[data-role="body"]')!;
+      const page = Number(body.dataset.page ?? 0);
+      body.innerHTML = html;
+      showPage(body, page); // a poll re-render shouldn't jump back to page 1
+    }
+
+    // Paged lists (ui.ts `paged`): one <ul data-page> per page, only one visible.
+    function showPage(body: HTMLElement, n: number) {
+      const pages = body.querySelectorAll<HTMLElement>('[data-page]');
+      if (!pages.length) return;
+      const i = Math.min(Math.max(n, 0), pages.length - 1);
+      pages.forEach((p, k) => (p.hidden = k !== i));
+      body.dataset.page = String(i);
+      body.querySelector('[data-role="page-num"]')!.textContent = `${i + 1} / ${pages.length}`;
+      body.querySelector<HTMLButtonElement>('[data-pager="-1"]')!.disabled = i === 0;
+      body.querySelector<HTMLButtonElement>('[data-pager="1"]')!.disabled = i === pages.length - 1;
+    }
+
+    cardsEl.addEventListener('click', (e) => {
+      const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-pager]');
+      const body = btn?.closest<HTMLElement>('[data-role="body"]');
+      if (btn && body) showPage(body, Number(body.dataset.page ?? 0) + Number(btn.dataset.pager));
+    });
+
+    async function refresh() {
+      let widgets: Widget[];
+      try {
+        const res = await fetch('/api/widgets');
+        if (!res.ok) return; // keep previous render; retry next poll
+        widgets = await res.json();
+      } catch {
+        return;
+      }
+      const byId = new Map(widgets.map((w) => [w.id, w]));
+      registry.forEach((d) => paint(d, byId.get(d.id)));
+      widgets.filter((w) => !known.has(w.id)).forEach((w) => paint(defFor(w.id, w.title), w));
+    }
+
+    function tick() {
+      const d = new Date();
+      const days = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+      document.getElementById('clock')!.textContent =
+        `${days[d.getDay()]} ${d.getMonth() + 1}月${d.getDate()}日`;
+      const h = d.getHours();
+      document.getElementById('greeting')!.textContent =
+        h < 5 ? '夜深了' : h < 11 ? '早上好' : h < 13 ? '中午好' : h < 18 ? '下午好' : '晚上好';
+    }
+
+    const btn = document.getElementById('refresh')!;
+    btn.addEventListener('click', async () => {
+      btn.classList.add('spin');
+      await refresh();
+      setTimeout(() => btn.classList.remove('spin'), 500);
+    });
+
+    tick();
+    setInterval(tick, 60_000);
+    refresh();
+    setInterval(refresh, 60_000);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') refresh();
+    });
+  </script>
+</Layout>

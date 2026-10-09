@@ -1,0 +1,8 @@
+# Dev-only secrets. Copy to .dev.vars (gitignored).
+# Production token is set via `wrangler secret put AGENT_TOKEN`.
+AGENT_TOKEN=dev-token-change-me
+
+# Finnhub API key for the cron stock fetcher (free key at https://finnhub.io).
+# If unset, the cron run just logs and skips — the app still works.
+# Production: wrangler secret put FINNHUB_API_KEY
+FINNHUB_API_KEY=
