@@ -10,7 +10,7 @@ binding = "ASSETS"
 [[d1_databases]]
 binding = "DB"
 database_name = "pulse-db"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "03fa6d2c-ff7e-4302-babb-189dc7242f7a"
 migrations_dir = "migrations"
 
 [triggers]
