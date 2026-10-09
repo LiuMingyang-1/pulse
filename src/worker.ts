@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import type { MiddlewareHandler } from 'hono';
 
 export interface Env {
   ASSETS: Fetcher;
@@ -111,6 +112,33 @@ async function runStockUpdate(env: Env): Promise<StockUpdateResult> {
 
 const app = new Hono<{ Bindings: Env }>();
 
+// ── Auth ───────────────────────────────────────────────────────────────────
+
+// Constant-time string comparison — pad to the same length and accumulate the
+// XOR diff without early return so response timing doesn't leak the token.
+// (No node:crypto here: the worker doesn't enable nodejs_compat.)
+function safeEqual(a: string, b: string): boolean {
+  const len = Math.max(a.length, b.length);
+  let diff = a.length ^ b.length;
+  for (let i = 0; i < len; i++) {
+    // charCodeAt past the end returns NaN, which XORs as 0 — that plus the
+    // length seed above keeps the loop running full length on a mismatch.
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+// Middleware: require `Authorization: Bearer <AGENT_TOKEN>` on agent-facing
+// routes. A missing/empty AGENT_TOKEN never matches, so the route 401s.
+const requireAuth: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
+  const auth = c.req.header('Authorization') ?? '';
+  const expected = `Bearer ${c.env.AGENT_TOKEN ?? ''}`;
+  if (!safeEqual(auth, expected)) {
+    return c.json({ error: 'unauthorized' }, 401);
+  }
+  await next();
+};
+
 app.get('/api/health', (c) => {
   return c.json({ ok: true, ts: new Date().toISOString() });
 });
@@ -154,12 +182,7 @@ app.get('/api/widgets/:id', async (c) => {
 // POST /api/widgets/:id — agent push. Requires `Authorization: Bearer <AGENT_TOKEN>`.
 // Body: { title?: string, data: any, source?: 'cron'|'hermes'|'alma'|'manual'|'agent' }
 // Upserts the row; title falls back to existing row's title, then to :id.
-app.post('/api/widgets/:id', async (c) => {
-  const auth = c.req.header('Authorization');
-  if (auth !== `Bearer ${c.env.AGENT_TOKEN}`) {
-    return c.json({ error: 'unauthorized' }, 401);
-  }
-
+app.post('/api/widgets/:id', requireAuth, async (c) => {
   const id = c.req.param('id');
 
   let body: { title?: unknown; data?: unknown; source?: unknown };
@@ -203,54 +226,14 @@ app.post('/api/widgets/:id', async (c) => {
     .bind(id, title, JSON.stringify(body.data), now, source)
     .run();
 
-  const row = await c.env.DB.prepare('SELECT * FROM widgets WHERE id = ?')
-    .bind(id)
-    .first<WidgetRow>();
-  return c.json(rowToWidget(row!));
-});
-
-// POST /api/dev/seed — dev helper: seeds the three built-in widgets with
-// empty-state data. Same Bearer auth as the push endpoint. Does NOT overwrite
-// rows that already have data (INSERT OR IGNORE per row).
-app.post('/api/dev/seed', async (c) => {
-  const auth = c.req.header('Authorization');
-  if (auth !== `Bearer ${c.env.AGENT_TOKEN}`) {
-    return c.json({ error: 'unauthorized' }, 401);
-  }
-
-  const now = new Date().toISOString();
-  const seeds: Array<[string, string, string]> = [
-    ['schedule', '今日安排', JSON.stringify({ events: [] })],
-    ['todo', '飞书待办', JSON.stringify({ pending_count: 0, items: [] })],
-    [
-      'stocks',
-      '美股持仓',
-      JSON.stringify({ total_pnl: 0, currency: 'USD', positions: [] }),
-    ],
-  ];
-
-  const stmts = seeds.map(([id, title, data]) =>
-    c.env.DB.prepare(
-      `INSERT OR IGNORE INTO widgets (id, title, data, updated_at, source)
-       VALUES (?, ?, ?, ?, 'agent')`,
-    ).bind(id, title, data, now),
-  );
-  await c.env.DB.batch(stmts);
-
-  const { results } = await c.env.DB.prepare(
-    'SELECT * FROM widgets ORDER BY id',
-  ).all<WidgetRow>();
-  return c.json({ seeded: true, widgets: (results ?? []).map(rowToWidget) });
+  // Same shape as rowToWidget — the DB holds nothing we didn't just write.
+  return c.json({ id, title, data: body.data, updated_at: now, source });
 });
 
 // POST /api/cron/run — manually trigger the stock update (same logic as the
 // cron trigger) so it can be tested without waiting for the schedule.
 // Same Bearer auth as the widget push endpoint.
-app.post('/api/cron/run', async (c) => {
-  const auth = c.req.header('Authorization');
-  if (auth !== `Bearer ${c.env.AGENT_TOKEN}`) {
-    return c.json({ error: 'unauthorized' }, 401);
-  }
+app.post('/api/cron/run', requireAuth, async (c) => {
   const result = await runStockUpdate(c.env);
   // no_api_key is a config state, not an upstream failure — report 200 with
   // the reason so `curl` testing shows a clean JSON body instead of an error.

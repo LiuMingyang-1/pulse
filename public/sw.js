@@ -1,5 +1,5 @@
 // Pulse service worker — bump CACHE_VERSION to invalidate old caches.
-const CACHE_VERSION = 'pulse-v6';
+const CACHE_VERSION = 'pulse-v7';
 const PRECACHE = ['/', '/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png', '/icon-180.png'];
 
 self.addEventListener('install', (e) => {

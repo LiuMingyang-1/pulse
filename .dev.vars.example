@@ -16,7 +16,9 @@ FINNHUB_API_KEY=
 #   https://xxx.feishu.cn/base/<LARK_APP_TOKEN>?table=<LARK_TABLE_ID>&view=...
 # PULSE_URL points at your deployed worker (defaults to localhost:8787).
 # PULSE_TOKEN defaults to AGENT_TOKEN above; only set it if they differ.
+# PULSE_SOURCE tags pushed rows' `source` field (defaults to 'alma').
 LARK_APP_TOKEN=
 LARK_TABLE_ID=
 PULSE_URL=
 # PULSE_TOKEN=
+# PULSE_SOURCE=

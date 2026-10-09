@@ -21,9 +21,10 @@ it: (1) npm install, (2) wrangler login, (3) create a D1 database named
 pulse-db and paste its database_id into wrangler.toml, (4) apply the
 migration, (5) have me generate a random AGENT_TOKEN and set it as a secret,
 optionally set FINNHUB_API_KEY for the stocks widget, (6) npm run deploy,
-(7) seed sample data and verify the API endpoints respond, (8) help me add it
-to my iPhone home screen as a PWA. Read README.md first for the full picture —
-your job is to get me from zero to a live worker URL.
+(7) verify the API works — GET /api/health, GET /api/widgets, and one real
+POST /api/widgets/:id round-trip (local seeding uses seed.example.sql), (8)
+help me add it to my iPhone home screen as a PWA. Read README.md first for
+the full picture — your job is to get me from zero to a live worker URL.
 
 Optional follow-up: if I want the Feishu/Lark todo widget wired up too, read
 docs/LARK_SETUP.md — it covers creating the bitable with the right fields,
@@ -106,7 +107,6 @@ GET  /api/widgets                   → [widget, ...]
 GET  /api/widgets/:id               → widget | 404
 POST /api/widgets/:id               → upsert (auth required)
 POST /api/cron/run                  → run the stock fetch now (auth required)
-POST /api/dev/seed                  → seed empty-state rows (auth required)
 ```
 
 Authed routes take `Authorization: Bearer <AGENT_TOKEN>`.

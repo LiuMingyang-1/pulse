@@ -1,5 +1,3 @@
-@import 'tailwindcss';
-
 /* Hark-inspired look: hazy sky backdrop, frosted pill nav,
    chunky white cards with soft shadows, large dark type. */
 
@@ -16,7 +14,19 @@
 }
 
 @layer base {
+  /* Minimal reset — replaces the framework preflight this CSS used to get
+     for free. The [hidden] rule must be !important: the pager hides pages
+     via the `hidden` attribute on ul.w-todos, whose author `display: flex`
+     would otherwise beat the UA rule and show every page at once. */
+  *, *::before, *::after { box-sizing: border-box; }
+  body, h1, h2, p, ul, ol, li { margin: 0; }
+  ul, ol { padding: 0; list-style: none; }
+  button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+  [hidden] { display: none !important; }
+
   body {
+    min-height: 100dvh;
+    line-height: 1.5;
     overscroll-behavior-y: none;
     -webkit-tap-highlight-color: transparent;
     -webkit-font-smoothing: antialiased;

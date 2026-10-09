@@ -11,8 +11,6 @@ import Layout from '../layouts/Layout.astro';
       </button>
       <nav class="glass pill">
         <span class="seg active">首页</span>
-        <span class="seg">聊天</span>
-        <span class="seg">项目</span>
       </nav>
       <div class="avatar" aria-hidden="true">P</div>
     </header>
@@ -65,13 +63,6 @@ import Layout from '../layouts/Layout.astro';
         el.style.gridRowEnd = desktop.matches ? `span ${Math.ceil((el.offsetHeight + 20) / 4)}` : '';
       }
     });
-    desktop.addEventListener('change', () =>
-      cardsEl.querySelectorAll<HTMLElement>('.card').forEach((c) => {
-        sizer.unobserve(c);
-        sizer.observe(c);
-      }),
-    );
-
     registry.forEach(cardFor);
 
     function paint(def: WidgetDef, w: Widget | undefined) {

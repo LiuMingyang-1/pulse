@@ -10,6 +10,7 @@
 // Env (in order): process.env → .dev.vars at repo root → defaults.
 //   PULSE_URL        (default http://localhost:8787)
 //   PULSE_TOKEN      (required unless --dry-run — same as AGENT_TOKEN)
+//   PULSE_SOURCE     (optional — the `source` tag on pushed rows; default 'alma')
 //   LARK_APP_TOKEN   (required — your bitable "app token", from the base URL)
 //   LARK_TABLE_ID    (required — the table id inside that base)
 //
@@ -37,6 +38,7 @@ if (existsSync(devVarsPath)) {
 const nonempty = (v) => (v && v.trim() !== '' ? v : undefined);
 const PULSE_URL = nonempty(process.env.PULSE_URL) ?? 'http://localhost:8787';
 const PULSE_TOKEN = nonempty(process.env.PULSE_TOKEN) ?? nonempty(process.env.AGENT_TOKEN);
+const SOURCE = nonempty(process.env.PULSE_SOURCE) ?? 'alma';
 const APP_TOKEN = nonempty(process.env.LARK_APP_TOKEN);
 const TABLE_ID = nonempty(process.env.LARK_TABLE_ID);
 const DRY_RUN = process.argv.includes('--dry-run');
@@ -133,7 +135,7 @@ async function push(id, title, data) {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${PULSE_TOKEN}`,
     },
-    body: JSON.stringify({ title, data, source: 'alma' }), // or 'hermes' — whichever agent runs this
+    body: JSON.stringify({ title, data, source: SOURCE }), // set PULSE_SOURCE to tag rows with the agent/host running this
   });
   if (!res.ok) {
     const text = await res.text();
