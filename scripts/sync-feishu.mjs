@@ -7,18 +7,38 @@
 //   node scripts/sync-feishu.mjs --dry-run          # fetch + transform, don't POST
 //   PULSE_URL=https://pulse.<you>.workers.dev PULSE_TOKEN=xxx node scripts/sync-feishu.mjs
 //
-// Env: PULSE_URL (default http://localhost:8787), PULSE_TOKEN (required unless --dry-run),
-//      LARK_APP_TOKEN (required — your Feishu bitable "app token", from the base URL),
-//      LARK_TABLE_ID  (required — the table id inside that base, also in the URL).
+// Env (in order): process.env → .dev.vars at repo root → defaults.
+//   PULSE_URL        (default http://localhost:8787)
+//   PULSE_TOKEN      (required unless --dry-run — same as AGENT_TOKEN)
+//   LARK_APP_TOKEN   (required — your bitable "app token", from the base URL)
+//   LARK_TABLE_ID    (required — the table id inside that base)
+//
+// So on your own machine you can just drop them in .dev.vars once and run
+// `node scripts/sync-feishu.mjs` without prefixing env vars every time.
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { readFileSync, existsSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 const execFileP = promisify(execFile);
 
-const PULSE_URL = process.env.PULSE_URL ?? 'http://localhost:8787';
-const PULSE_TOKEN = process.env.PULSE_TOKEN;
-const APP_TOKEN = process.env.LARK_APP_TOKEN;
-const TABLE_ID = process.env.LARK_TABLE_ID;
+// Load .dev.vars (same file wrangler dev uses) — env vars from the shell
+// still take precedence.
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
+const devVarsPath = join(repoRoot, '.dev.vars');
+if (existsSync(devVarsPath)) {
+  for (const line of readFileSync(devVarsPath, 'utf8').split('\n')) {
+    const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
+    if (m && !(m[1] in process.env)) process.env[m[1]] = m[2];
+  }
+}
+
+const nonempty = (v) => (v && v.trim() !== '' ? v : undefined);
+const PULSE_URL = nonempty(process.env.PULSE_URL) ?? 'http://localhost:8787';
+const PULSE_TOKEN = nonempty(process.env.PULSE_TOKEN) ?? nonempty(process.env.AGENT_TOKEN);
+const APP_TOKEN = nonempty(process.env.LARK_APP_TOKEN);
+const TABLE_ID = nonempty(process.env.LARK_TABLE_ID);
 const DRY_RUN = process.argv.includes('--dry-run');
 
 if (!APP_TOKEN || !TABLE_ID) {

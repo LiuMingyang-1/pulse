@@ -3,9 +3,10 @@ dist/
 .wrangler/
 .dev.vars
 .astro/
-logs/
 .alma-snapshots
-# private seed data — use seed.example.sql for the repo version
+
+# local-only content — these hold real data/credentials, never commit
 seed.sql
-# local launchd config — use scripts/com.pulse.sync-feishu.plist.example
+logs/
+docs-internal/
 scripts/com.pulse.sync-feishu.plist

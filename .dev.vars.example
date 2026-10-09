@@ -1,8 +1,22 @@
 # Dev-only secrets. Copy to .dev.vars (gitignored).
-# Production token is set via `wrangler secret put AGENT_TOKEN`.
+# Production tokens are set via `wrangler secret put <NAME>`.
+#
+# This file is loaded by `wrangler dev` automatically, AND by
+# `scripts/sync-feishu.mjs` for any vars it needs (PULSE_TOKEN falls back to
+# AGENT_TOKEN if unset). One file = all local secrets for this project.
+
 AGENT_TOKEN=dev-token-change-me
 
 # Finnhub API key for the cron stock fetcher (free key at https://finnhub.io).
 # If unset, the cron run just logs and skips — the app still works.
-# Production: wrangler secret put FINNHUB_API_KEY
 FINNHUB_API_KEY=
+
+# Optional — only needed if you run scripts/sync-feishu.mjs locally.
+# LARK_APP_TOKEN and LARK_TABLE_ID come from your bitable URL:
+#   https://xxx.feishu.cn/base/<LARK_APP_TOKEN>?table=<LARK_TABLE_ID>&view=...
+# PULSE_URL points at your deployed worker (defaults to localhost:8787).
+# PULSE_TOKEN defaults to AGENT_TOKEN above; only set it if they differ.
+LARK_APP_TOKEN=
+LARK_TABLE_ID=
+PULSE_URL=
+# PULSE_TOKEN=
