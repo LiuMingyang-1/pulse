@@ -115,12 +115,13 @@ function toReminder(rows) {
   return { items };
 }
 
-// schedule contract: { events: [{title, start, end}] } — only tasks decided for
-// today (Status=Doing) AND actually slotted (both Scheduled times present).
-// Sorting / "now" highlighting happens client-side so the card stays correct
-// between 5-min syncs without re-pushing.
+// schedule contract: { events: [{title, start, end}] } — every record decided
+// for today (Status=Doing) AND actually slotted (both Scheduled times present),
+// regardless of Type: talks/interviews often aren't Type=Task but still belong
+// on today's timeline. Sorting / "now" highlighting happens client-side so the
+// card stays correct between 5-min syncs without re-pushing.
 function toSchedule(rows) {
-  const events = pending(rows, 'Task')
+  const events = rows
     .filter((row) => first(row[3]) === 'Doing' && row[5] && row[6])
     .map((row) => ({ title: row[0] ?? '(untitled)', start: row[5], end: row[6] }))
     .sort((a, b) => (a.start < b.start ? -1 : 1));
