@@ -90,6 +90,22 @@ npm run deploy
 openssl rand -hex 32
 ```
 
+### Auto-deploy on push (GitHub Actions)
+
+`.github/workflows/deploy.yml` runs `astro build` + `wrangler deploy` on every
+push to `main` (or manually via Actions → Deploy → Run workflow). Set two repo
+secrets under Settings → Secrets and variables → Actions:
+
+- `CLOUDFLARE_API_TOKEN` — dash.cloudflare.com → My Profile → API Tokens →
+  create with the **Edit Cloudflare Workers** template (it includes Workers,
+  D1, and cron permissions; scope it to this account)
+- `CLOUDFLARE_ACCOUNT_ID` — any Workers/D1 page in the dash shows it in the
+  right sidebar, or `wrangler whoami`
+
+The workflow only redeploys the Worker — D1 schema changes still need a manual
+`npx wrangler d1 migrations apply pulse-db --remote`, and secrets
+(`AGENT_TOKEN`, `FINNHUB_API_KEY`) stay set via `wrangler secret put` as above.
+
 ## Local dev
 
 ```sh
