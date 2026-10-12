@@ -41,6 +41,9 @@ const PULSE_TOKEN = nonempty(process.env.PULSE_TOKEN) ?? nonempty(process.env.AG
 const SOURCE = nonempty(process.env.PULSE_SOURCE) ?? 'alma';
 const APP_TOKEN = nonempty(process.env.LARK_APP_TOKEN);
 const TABLE_ID = nonempty(process.env.LARK_TABLE_ID);
+// lark-cli identity: 'user' (your OAuth login) or 'bot' (app credentials).
+// Default stays 'user' so existing setups keep working; set LARK_AS=bot to switch.
+const LARK_AS = nonempty(process.env.LARK_AS) ?? 'user';
 const DRY_RUN = process.argv.includes('--dry-run');
 
 if (!APP_TOKEN || !TABLE_ID) {

@@ -169,6 +169,10 @@ node scripts/sync-feishu.mjs
 Both IDs come from the bitable URL:
 `https://xxx.feishu.cn/base/<LARK_APP_TOKEN>?table=<LARK_TABLE_ID>&view=...`
 
+The script hits lark-cli as `user` by default (your OAuth login). To run as
+the app/bot instead — e.g. on a server without a user session — set
+`LARK_AS=bot`.
+
 To run it every 5 min on a Mac, copy
 `scripts/com.pulse.sync-feishu.plist.example` to
 `~/Library/LaunchAgents/com.pulse.sync-feishu.plist`, fill in your paths and
