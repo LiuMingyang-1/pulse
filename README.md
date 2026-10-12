@@ -71,8 +71,14 @@ todo.data     = { "pending_count": number,    // unfinished only
                               "done"?: bool,        // locally checked off
                               "pending"?: bool,     // write-back queued
                               "prev_status"?: string, // restored on undo
+                              "completed_at"?: ISO8601, // first observed Done —
+                                                    // toggles stamp it, sync
+                                                    // carries/stamps it
                               "sync_failed"?: bool }],
-                  "done_items"?: [{ same shape }],  // Status=Done in Feishu,
+                  "done_items"?: [{ same shape }],  // Status=Done in Feishu AND
+                                                    // completed today
+                                                    // (completed_at stamped on
+                                                    // first observation);
                                                     // sunken below the pager
                   "pending_writes"?: [{ "record_id": string,
                                        "status": string,

@@ -241,6 +241,7 @@ interface TodoItem {
   pending?: boolean;
   prev_status?: string;
   sync_failed?: boolean;
+  completed_at?: string;
   [k: string]: unknown;
 }
 interface PendingWrite {
@@ -290,7 +291,11 @@ app.post('/api/todo/toggle', requireAuth, async (c) => {
   delete it.sync_failed;
   // On completion stash the item's real Feishu status so undo restores it —
   // 'Doing' is only the fallback when sync data predates the status field.
+  // completed_at is the server-side completion stamp sync uses to keep
+  // done_items today-only; it survives undo (history — the item being back
+  // in `items` already keeps it out of the sunken section).
   if (nowDone && !it.prev_status) it.prev_status = it.status ?? 'Doing';
+  if (nowDone) it.completed_at = new Date().toISOString();
 
   const writes: PendingWrite[] = Array.isArray(data.pending_writes) ? data.pending_writes : [];
   // A toggle on an already-queued record replaces the queued target — keeps

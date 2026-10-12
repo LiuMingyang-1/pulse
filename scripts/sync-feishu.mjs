@@ -64,13 +64,16 @@ if (!PULSE_TOKEN && !DRY_RUN) {
 
 // ── Fetch records via lark-cli ────────────────────────────────────────────
 // lark-cli base +record-list --app-token X --table-id Y --as user --format json
+const FIELD_IDS = [
+  'Task', 'Due', 'Priority', 'Status', 'Type',
+  'Scheduled Start', 'Scheduled End',
+];
 async function fetchRecords() {
   const { stdout } = await execFileP('lark-cli', [
     'base', '+record-list',
     '--base-token', APP_TOKEN,
     '--table-id', TABLE_ID,
-    '--field-id', 'Task', '--field-id', 'Due', '--field-id', 'Priority', '--field-id', 'Status', '--field-id', 'Type',
-    '--field-id', 'Scheduled Start', '--field-id', 'Scheduled End',
+    ...FIELD_IDS.flatMap((f) => ['--field-id', f]),
     '--as', LARK_AS,
     '--format', 'json',
   ], { maxBuffer: 16 * 1024 * 1024 });
@@ -81,6 +84,18 @@ async function fetchRecords() {
   // data.record_id_list aligns with data.data rows by index — zip to get ids.
   const rows = parsed?.data?.data ?? [];
   const ids = parsed?.data?.record_id_list ?? [];
+  // lark-cli silently drops --field-id names it doesn't know (no error, just a
+  // shorter row) — a swallowed column would shift every positional read after
+  // it, so hard-fail here instead of syncing misread data.
+  const bad = rows.findIndex((row) => !Array.isArray(row) || row.length !== FIELD_IDS.length);
+  if (bad >= 0) {
+    const got = Array.isArray(rows[bad]) ? rows[bad].length : 'non-array';
+    throw new Error(
+      `record-list column count mismatch on row ${bad}: expected ${FIELD_IDS.length} ` +
+      `columns (${FIELD_IDS.join(', ')}), got ${got}. An unknown --field-id was ` +
+      `probably swallowed silently — check the field names against the bitable.`,
+    );
+  }
   return rows.map((row, i) => ({ row, record_id: ids[i] }));
 }
 
@@ -145,12 +160,29 @@ async function fetchTodoData() {
 }
 
 // ── Transform bitable rows → widget data shapes ───────────────────────────
-// records = [{row: [Task, Due, Priority, Status, Type, SchedStart, SchedEnd], record_id}]
+// records = [{row: [Task, Due, Priority, Status, Type, SchedStart, SchedEnd],
+//             record_id}]
 // Type splits rows into two cards: 'Task' → todo, 'Reminder' → reminder.
 // Other types (e.g. Reading) aren't shown.
 const first = (v) => (Array.isArray(v) ? v[0] : v);
 
-const DONE_LIMIT = 20; // cap the sunken done section — "recently completed", not a log
+const DONE_LIMIT = 20; // cap the sunken done section — "completed today", not a log
+
+// Does an ISO timestamp fall on today? "Today" = local date on the sync host
+// (it runs in the user's timezone). completed_at is always written by us as
+// Date#toISOString, so no epoch-ms/localized formats to handle — missing or
+// unparseable counts as NOT today so the row drops from done_items.
+function isTodayDate(isoString) {
+  if (typeof isoString !== 'string' || isoString.trim() === '') return false;
+  const d = new Date(isoString);
+  if (Number.isNaN(d.getTime())) return false;
+  const now = new Date();
+  return (
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  );
+}
 
 function pending(records, type) {
   return records.filter(({ row }) => first(row[3]) !== 'Done' && first(row[4]) === type);
@@ -166,10 +198,12 @@ function byPriorityThenDue(a, b) {
 }
 
 // todo contract: { pending_count, items: [{id, title, due, priority, status,
-//   done?, pending?, prev_status?, sync_failed?}], done_items?: [...],
-//   pending_writes? }
+//   done?, pending?, prev_status?, sync_failed?, completed_at?}],
+//   done_items?: [...], pending_writes? }
 // Feishu Status is truth; local flags only bridge the gap until the write lands.
-function toTodo(records, local, acked, failed) {
+// `now` = this sync run's ISO timestamp — stamped as completed_at when a row
+// newly flips to Done (see below).
+function toTodo(records, local, acked, failed, now) {
   const localById = new Map();
   for (const list of [local?.items, local?.done_items]) {
     if (Array.isArray(list)) for (const it of list) if (it?.id) localById.set(it.id, it);
@@ -207,9 +241,18 @@ function toTodo(records, local, acked, failed) {
     })
     .sort(byPriorityThenDue);
 
-  // Feishu-side completions. Merge EVERY Done row first (local undo may
-  // resurrect a row outside the cap), then keep the last DONE_LIMIT as the
-  // sunken "recently completed" section — a cap, not a log.
+  // Feishu-side completions. The bitable has no reliable completion timestamp
+  // (last_modified_time isn't a field lark-cli can select here; Created is a
+  // bulk-import constant), so we track it ourselves via completed_at:
+  //   - prev.completed_at exists          → keep it (already tracked)
+  //   - prev existed and wasn't done      → stamp `now` (newly completed —
+  //     either drained our own pending write or was checked off in Feishu)
+  //   - otherwise (never seen, or legacy Done with no stamp) → leave undefined:
+  //     the 60 historical Done rows predate tracking and must NOT all land in
+  //     today's section on the first run after this deploys.
+  // done_items keeps only stamps that fall on today (isTodayDate). A pending
+  // local undo (done:false + queued/failed write) still lifts the row back
+  // into items regardless of stamp — an undo never disappears.
   const mergedDone = records
     .filter(({ row }) => first(row[3]) === 'Done' && first(row[4]) === 'Task')
     .map(({ row, record_id: id }) => {
@@ -222,6 +265,13 @@ function toTodo(records, local, acked, failed) {
         status: 'Done',
         done: true,
       };
+      if (prev?.completed_at) {
+        it.completed_at = prev.completed_at;
+      } else if (prev && prev.done !== true) {
+        // prev lived in `items` unfinished (done absent/false — only toggles
+        // set done explicitly) and Feishu now says Done: newly completed.
+        it.completed_at = now;
+      }
       // Keep prev_status so an undo can restore the pre-done Feishu status.
       if (prev?.prev_status) it.prev_status = prev.prev_status;
       if (prev && prev.done === false && (queuedIds.has(id) || failed.has(id))) {
@@ -231,7 +281,9 @@ function toTodo(records, local, acked, failed) {
       }
       return it;
     });
-  const sunken = mergedDone.filter((it) => it.done).slice(-DONE_LIMIT);
+  const sunken = mergedDone
+    .filter((it) => it.done && isTodayDate(it.completed_at))
+    .slice(-DONE_LIMIT);
   items.push(...mergedDone.filter((it) => !it.done));
   items.sort(byPriorityThenDue);
 
@@ -297,7 +349,7 @@ try {
   const writes = Array.isArray(localTodo?.pending_writes) ? localTodo.pending_writes : [];
   const { acked, failed } = await drainPendingWrites(writes);
   if (writes.length) console.log(`pending_writes: ${acked.size} acked, ${failed.size} failed`);
-  const todo = toTodo(records, localTodo, acked, failed);
+  const todo = toTodo(records, localTodo, acked, failed, new Date().toISOString());
   const reminder = toReminder(records);
   const schedule = toSchedule(records);
   console.log(`transformed → ${todo.pending_count} tasks (+${(todo.done_items ?? []).length} done), ${reminder.items.length} reminders, ${schedule.events.length} scheduled`);

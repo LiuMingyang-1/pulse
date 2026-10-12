@@ -15,8 +15,13 @@
 --                                "priority": "P0"|"P1"|"P2",
 --                                "status"?: string (current Feishu Status),
 --                                "done"?: bool, "pending"?: bool,
---                                "prev_status"?: string, "sync_failed"?: bool }],
---                     "done_items"?: [{ same shape, Status=Done in Feishu }],
+--                                "prev_status"?: string, "sync_failed"?: bool,
+--                                "completed_at"?: ISO8601 (when first observed
+--                                  Done — stamped by toggle or by sync) }],
+--                     "done_items"?: [{ same shape, Status=Done in Feishu AND
+--                                       completed_at falls on today — sync
+--                                       stamps it on first observation of the
+--                                       Done state }],
 --                     "pending_writes"?: [{ "record_id", "status", "requested_at" }] }
 --   stocks.data   = { "total_pnl": number (USD, signed),
 --                     "currency": "USD",
@@ -29,7 +34,7 @@ INSERT OR REPLACE INTO widgets (id, title, data, updated_at, source) VALUES
    '2026-10-09T01:30:00.000Z', 'manual'),
 
   ('todo', '飞书待办',
-   '{"pending_count":3,"items":[{"id":"recFakeSeed001","title":"Write the API design doc","due":"2026-10-10T18:00:00+08:00","priority":"P1"},{"id":"recFakeSeed002","title":"Renew domain example.com","due":"2026-10-15T00:00:00+08:00","priority":"P0"},{"id":"recFakeSeed003","title":"Reply to design review","due":"2026-10-09T18:00:00+08:00","priority":"P2"}]}',
+   '{"pending_count":3,"items":[{"id":"recFakeSeed001","title":"Write the API design doc","due":"2026-10-10T18:00:00+08:00","priority":"P1"},{"id":"recFakeSeed002","title":"Renew domain example.com","due":"2026-10-15T00:00:00+08:00","priority":"P0"},{"id":"recFakeSeed003","title":"Reply to design review","due":"2026-10-09T18:00:00+08:00","priority":"P2"}],"done_items":[{"id":"recFakeSeed004","title":"Book dentist appointment","due":null,"priority":"P2","status":"Done","done":true,"completed_at":"2026-10-12T01:45:00.000Z"}]}',
    '2026-10-09T02:10:00.000Z', 'manual'),
 
   ('reminder', 'Reminder',
