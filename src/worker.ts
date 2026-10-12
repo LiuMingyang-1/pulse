@@ -230,6 +230,109 @@ app.post('/api/widgets/:id', requireAuth, async (c) => {
   return c.json({ id, title, data: body.data, updated_at: now, source });
 });
 
+// POST /api/todo/toggle — flip one item's done state inside the Worker so the
+// read-modify-write happens in a single invocation (the old GET→flip→POST-blob
+// flow raced with the sync's own push and with rapid clicks).
+// Body: { "id": "<record_id>", "done": true|false }. Returns the updated widget.
+interface TodoItem {
+  id?: string;
+  status?: string;
+  done?: boolean;
+  pending?: boolean;
+  prev_status?: string;
+  sync_failed?: boolean;
+  [k: string]: unknown;
+}
+interface PendingWrite {
+  record_id?: string;
+  status?: string;
+  requested_at?: string;
+  [k: string]: unknown;
+}
+
+app.post('/api/todo/toggle', requireAuth, async (c) => {
+  let body: { id?: unknown; done?: unknown };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'invalid_json' }, 400);
+  }
+  if (typeof body.id !== 'string' || typeof body.done !== 'boolean') {
+    return c.json({ error: 'missing_field', field: 'id|done' }, 400);
+  }
+
+  const row = await c.env.DB.prepare('SELECT * FROM widgets WHERE id = ?')
+    .bind('todo')
+    .first<WidgetRow>();
+  if (!row) return c.json({ error: 'not_found', id: 'todo' }, 404);
+
+  let data: {
+    items?: TodoItem[];
+    done_items?: TodoItem[];
+    pending_writes?: PendingWrite[];
+    pending_count?: number;
+    [k: string]: unknown;
+  };
+  try {
+    data = JSON.parse(row.data);
+  } catch {
+    return c.json({ error: 'bad_widget_data' }, 500);
+  }
+
+  const items: TodoItem[] = Array.isArray(data.items) ? data.items : [];
+  const doneItems: TodoItem[] = Array.isArray(data.done_items) ? data.done_items : [];
+  const it = [...items, ...doneItems].find((x) => x.id === body.id);
+  if (!it) return c.json({ error: 'item_not_found', id: body.id }, 404);
+
+  const nowDone = body.done;
+  it.done = nowDone;
+  it.pending = true; // until sync confirms the Feishu write
+  delete it.sync_failed;
+  // On completion stash the item's real Feishu status so undo restores it —
+  // 'Doing' is only the fallback when sync data predates the status field.
+  if (nowDone && !it.prev_status) it.prev_status = it.status ?? 'Doing';
+
+  const writes: PendingWrite[] = Array.isArray(data.pending_writes) ? data.pending_writes : [];
+  // A toggle on an already-queued record replaces the queued target — keeps
+  // rapid check→undo→check from stacking contradictory writes.
+  const queued = writes.findIndex((x) => x?.record_id === body.id);
+  const entry: PendingWrite = {
+    record_id: body.id,
+    // Undo writes prev_status back to Feishu; 'Inbox' only when an item was
+    // completed before prev_status existed — rare, so a mild surprise is fine.
+    status: nowDone ? 'Done' : (it.prev_status ?? 'Inbox'),
+    requested_at: new Date().toISOString(),
+  };
+  if (queued >= 0) writes.splice(queued, 1, entry);
+  else writes.push(entry);
+  data.pending_writes = writes;
+
+  // Undo on a Feishu-acked item lives in done_items — lift it back into items.
+  if (!nowDone && !items.includes(it)) {
+    items.push(it);
+    data.done_items = doneItems.filter((x) => x !== it);
+  }
+  // Done toggles stay in `items` (locally sunken); sync moves them to
+  // done_items once Feishu confirms.
+  data.items = items;
+  data.pending_count = items.filter((x) => !x.done).length;
+
+  const now = new Date().toISOString();
+  await c.env.DB.prepare(
+    "UPDATE widgets SET data = ?, updated_at = ?, source = 'manual' WHERE id = ?",
+  )
+    .bind(JSON.stringify(data), now, 'todo')
+    .run();
+
+  return c.json({
+    id: 'todo',
+    title: row.title,
+    data,
+    updated_at: now,
+    source: 'manual',
+  });
+});
+
 // POST /api/cron/run — manually trigger the stock update (same logic as the
 // cron trigger) so it can be tested without waiting for the schedule.
 // Same Bearer auth as the widget push endpoint.

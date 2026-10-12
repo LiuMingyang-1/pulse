@@ -280,7 +280,37 @@
   border: 1px solid rgba(255, 255, 255, 0.5);
   box-shadow: 0 1px 3px rgba(30, 60, 110, 0.05);
 }
-.w-check { width: 20px; height: 20px; flex: none; border-radius: 50%; border: 2px solid #c5cbd6; }
+.w-check { width: 20px; height: 20px; flex: none; border-radius: 50%; border: 2px solid #c5cbd6; position: relative; }
+button.w-check { cursor: pointer; }
+button.w-check:active { transform: scale(0.88); }
+button.w-check:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* done items sink into a quiet section under the pager — hairline on top */
+.w-todos-done { border-top: 1px solid var(--hair); padding-top: 8px; }
+.w-todo.is-done { opacity: 0.55; background: rgba(255, 255, 255, 0.3); }
+.w-todo.is-done .w-todo-title { text-decoration: line-through; color: var(--ink-3); }
+.w-todo.is-done .w-pill { background: #e7ebf2; color: var(--ink-3); }
+.w-todo.is-done .w-check { background: var(--ink-3); border-color: var(--ink-3); }
+/* drawn ✓ inside the filled circle */
+.w-todo.is-done .w-check::after {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 2px;
+  width: 5px;
+  height: 9px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+/* Feishu write-back failed — red ring until the next successful sync */
+.w-todo.is-failed .w-check { border-color: var(--down); }
+/* no-token tap hint: the flip won't persist */
+.w-check.w-shake { animation: w-shake 0.35s ease; }
+@keyframes w-shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-3px); }
+  75% { transform: translateX(3px); }
+}
 .w-todo-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .w-todo-title { font-size: 16px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .w-todo-due { font-size: 12px; color: var(--ink-3); }

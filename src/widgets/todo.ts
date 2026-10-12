@@ -13,7 +13,23 @@ function fmtDue(iso: string | null): string {
   return `${d.getMonth() + 1}月${d.getDate()}日`;
 }
 
-// data = { pending_count: number, items: [{ title, due (ISO), priority: 'P0'|'P1'|'P2' }] }
+// data = { pending_count: number,
+//          items: [{ id?, title, due (ISO), priority: 'P0'|'P1'|'P2',
+//                    status?, done?, pending?, prev_status?, sync_failed? }],
+//          done_items?: [{ same shape }],
+//          pending_writes?: [{ record_id, status, requested_at }] }
+// Items without `id` (old/seed data) render a non-clickable static circle.
+// Locally-done items not yet in Feishu stay in `items` with done:true and sink
+// to the done section; `done_items` from sync carry Feishu-side completions.
+function todoRow(it: any): string {
+  const p = String(it.priority ?? '');
+  const cls = ['w-todo', it.done && 'is-done', it.sync_failed && 'is-failed'].filter(Boolean).join(' ');
+  const check = it.id
+    ? `<button class="w-check" data-id="${esc(it.id)}" aria-label="${it.done ? '恢复' : '完成'}"></button>`
+    : `<span class="w-check" aria-hidden="true"></span>`;
+  return `<li class="${cls}">${check}<div class="w-todo-main"><span class="w-todo-title">${esc(it.title)}</span><span class="w-todo-due">${esc(fmtDue(it.due))}</span></div>${p ? `<span class="w-pill w-${esc(p.toLowerCase())}">${esc(p)}</span>` : ''}</li>`;
+}
+
 export const todo: WidgetDef = {
   id: 'todo',
   title: '飞书待办',
@@ -21,12 +37,19 @@ export const todo: WidgetDef = {
   render(data) {
     const count = num(data?.pending_count);
     const items = Array.isArray(data?.items) ? data.items : [];
-    if (count === 0 && items.length === 0) return empty('全部完成，干得漂亮');
+    const doneItems = Array.isArray(data?.done_items) ? data.done_items : [];
+    // items 里 done:true 的是本地标记、飞书还没确认的；done_items 是飞书侧
+    // 已完成的。两段合并成沉底区，但 done_items 里的 id 不能和 items 重复。
+    const localDone = items.filter((it: any) => it.done);
+    const localIds = new Set(localDone.map((it: any) => it.id));
+    const remoteDone = doneItems.filter((it: any) => !localIds.has(it.id));
+    const done = [...localDone, ...remoteDone];
+    const pendingList = items.filter((it: any) => !it.done);
+    if (pendingList.length === 0 && done.length === 0) return empty('全部完成，干得漂亮');
     const lead = `<p class="w-lead">还有 <b>${count}</b> 项待办未完成。</p>`;
-    const list = items.map((it: any) => {
-      const p = String(it.priority ?? '');
-      return `<li class="w-todo"><span class="w-check"></span><div class="w-todo-main"><span class="w-todo-title">${esc(it.title)}</span><span class="w-todo-due">${esc(fmtDue(it.due))}</span></div>${p ? `<span class="w-pill w-${esc(p.toLowerCase())}">${esc(p)}</span>` : ''}</li>`;
-    });
-    return lead + (items.length ? paged(list, 'w-todos') : '');
+    const doneHtml = done.length
+      ? `<ul class="w-todos w-todos-done">${done.map(todoRow).join('')}</ul>`
+      : '';
+    return lead + (pendingList.length ? paged(pendingList.map(todoRow), 'w-todos') : '') + doneHtml;
   },
 };

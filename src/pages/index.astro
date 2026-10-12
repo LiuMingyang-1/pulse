@@ -93,13 +93,74 @@ import Layout from '../layouts/Layout.astro';
       body.querySelector<HTMLButtonElement>('[data-pager="1"]')!.disabled = i === pages.length - 1;
     }
 
+    // ── todo toggle auth ─────────────────────────────────────────────────
+    // ?token=<AGENT_TOKEN> once → localStorage, then strip it from the URL so
+    // the bookmark/address bar doesn't carry the secret around.
+    const TOKEN_KEY = 'pulse_token';
+    const urlToken = new URLSearchParams(location.search).get('token');
+    if (urlToken) {
+      localStorage.setItem(TOKEN_KEY, urlToken);
+      history.replaceState(null, '', location.pathname);
+    }
+    const writeToken = () => localStorage.getItem(TOKEN_KEY);
+
+    // Client-side serialization is only a courtesy — POST /api/todo/toggle
+    // does the flip inside the Worker so the server is the real serialization
+    // point. todoMutationGen guards refresh() from repainting stale poll data
+    // over a newer toggle result.
+    let toggleQueue: Promise<void> = Promise.resolve();
+    let todoMutationGen = 0;
+    const lastToggle = new Map<string, boolean>();
+
     cardsEl.addEventListener('click', (e) => {
       const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-pager]');
       const body = btn?.closest<HTMLElement>('[data-role="body"]');
       if (btn && body) showPage(body, Number(body.dataset.page ?? 0) + Number(btn.dataset.pager));
+
+      // Only inside the todo card — other widgets reuse .w-todo rows.
+      const check = (e.target as HTMLElement).closest<HTMLElement>('[data-widget="todo"] .w-check[data-id]');
+      if (check?.dataset.id) toggleTodo(check.dataset.id, check);
     });
 
+    // Flip one item's done state: one POST, repaint the todo card from the
+    // response. Without a token it's a local-only flip (gone on refresh) with
+    // a shake to hint it didn't persist.
+    function toggleTodo(id: string, el: HTMLElement) {
+      const token = writeToken();
+      if (!token) {
+        el.closest('.w-todo')?.classList.toggle('is-done');
+        el.classList.add('w-shake');
+        setTimeout(() => el.classList.remove('w-shake'), 400);
+        return;
+      }
+      // Track the last requested state per item — rapid clicks on the same
+      // circle must see each other's intent (check→undo→check collapses to a
+      // single final write via the server's queue replace).
+      const nowDone = !(lastToggle.get(id) ?? el.closest('.w-todo')?.classList.contains('is-done'));
+      lastToggle.set(id, nowDone);
+      todoMutationGen++;
+      toggleQueue = toggleQueue.then(() => doToggle(id, nowDone)).catch(() => {});
+    }
+
+    async function doToggle(id: string, nowDone: boolean) {
+      const res = await fetch('/api/todo/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${writeToken()}` },
+        body: JSON.stringify({ id, done: nowDone }),
+      });
+      if (!res.ok) {
+        // The intent never landed — drop it so a retry click recomputes from
+        // the DOM instead of inverting off stale memory.
+        if (lastToggle.get(id) === nowDone) lastToggle.delete(id);
+        return; // keep polling view; next sync/poll reconciles
+      }
+      paint(defFor('todo'), await res.json());
+      // The DOM now reflects this toggle — the next click can read it again.
+      if (lastToggle.get(id) === nowDone) lastToggle.delete(id);
+    }
+
     async function refresh() {
+      const gen = todoMutationGen; // snapshot before the fetch
       let widgets: Widget[];
       try {
         const res = await fetch('/api/widgets');
@@ -109,7 +170,15 @@ import Layout from '../layouts/Layout.astro';
         return;
       }
       const byId = new Map(widgets.map((w) => [w.id, w]));
-      registry.forEach((d) => paint(d, byId.get(d.id)));
+      registry.forEach((d) => {
+        // A poll fetched before a toggle landed carries stale todo data —
+        // skip repainting that card if a mutation started mid-fetch.
+        if (d.id === 'todo') {
+          if (todoMutationGen !== gen) return;
+          lastToggle.clear(); // fresh server truth rendered — drop click memory
+        }
+        paint(d, byId.get(d.id));
+      });
       widgets.filter((w) => !known.has(w.id)).forEach((w) => paint(defFor(w.id, w.title), w));
     }
 

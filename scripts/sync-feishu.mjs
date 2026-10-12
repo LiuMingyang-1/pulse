@@ -13,6 +13,11 @@
 //   PULSE_SOURCE     (optional — the `source` tag on pushed rows; default 'alma')
 //   LARK_APP_TOKEN   (required — your bitable "app token", from the base URL)
 //   LARK_TABLE_ID    (required — the table id inside that base)
+//   LARK_AS          (optional — lark-cli identity: 'user' default, or 'bot')
+//
+// The todo widget also round-trips user clicks: the browser POSTs a
+// `pending_writes` queue into todo.data, and each sync drains it by writing
+// Status back to Feishu via `lark-cli base +record-batch-update`.
 //
 // So on your own machine you can just drop them in .dev.vars once and run
 // `node scripts/sync-feishu.mjs` without prefixing env vars every time.
@@ -66,54 +71,190 @@ async function fetchRecords() {
     '--table-id', TABLE_ID,
     '--field-id', 'Task', '--field-id', 'Due', '--field-id', 'Priority', '--field-id', 'Status', '--field-id', 'Type',
     '--field-id', 'Scheduled Start', '--field-id', 'Scheduled End',
-    '--as', 'user',
+    '--as', LARK_AS,
     '--format', 'json',
   ], { maxBuffer: 16 * 1024 * 1024 });
   const parsed = JSON.parse(stdout);
   // lark-cli json format returns matrix rows: {data:{data:[[...],...]}}
   // Field order matches --field-id flags:
   //   [Task, Due, Priority, Status, Type, Scheduled Start, Scheduled End]
+  // data.record_id_list aligns with data.data rows by index — zip to get ids.
   const rows = parsed?.data?.data ?? [];
-  return rows;
+  const ids = parsed?.data?.record_id_list ?? [];
+  return rows.map((row, i) => ({ row, record_id: ids[i] }));
+}
+
+// ── Drain local todo writes back to Feishu ─────────────────────────────────
+// The browser queues {record_id, status} in todo.data.pending_writes; we flush
+// them in one batch call so clicks don't wait for a manual Feishu edit.
+// Returns Sets of acked / failed record_ids. Never throws — write-back
+// failures shouldn't block the main push.
+async function drainPendingWrites(writes) {
+  const acked = new Set();
+  const failed = new Set();
+  if (!writes.length) return { acked, failed };
+  const update_records = {};
+  for (const w of writes) {
+    if (w?.record_id && typeof w.status === 'string') {
+      update_records[w.record_id] = { Status: [w.status] };
+    }
+  }
+  if (!Object.keys(update_records).length) return { acked, failed };
+  if (DRY_RUN) {
+    console.log('would batch-update:', JSON.stringify({ update_records }));
+    return { acked, failed };
+  }
+  try {
+    // --json takes the {update_records:{rid:{field:value}}} payload per the
+    // upstream skills/lark-base docs; `lark-cli base +record-batch-update
+    // --help` on the sync host is the final arbiter.
+    await execFileP('lark-cli', [
+      'base', '+record-batch-update',
+      '--base-token', APP_TOKEN,
+      '--table-id', TABLE_ID,
+      '--as', LARK_AS,
+      '--json', JSON.stringify({ update_records }),
+      '--format', 'json',
+    ], { maxBuffer: 16 * 1024 * 1024 });
+    Object.keys(update_records).forEach((rid) => acked.add(rid));
+  } catch (err) {
+    console.error(`pending_writes batch-update failed (${Object.keys(update_records).length} records):`, err.message ?? err);
+    Object.keys(update_records).forEach((rid) => failed.add(rid));
+  }
+  return { acked, failed };
+}
+
+// Read the current todo.data from D1 — carries the browser's pending_writes
+// queue plus per-item done/prev_status flags we merge against Feishu truth.
+// 404 → the widget row doesn't exist yet (fine, push fresh). Anything else
+// (5xx, network, bad JSON) → ok:false so main skips the todo push entirely:
+// overwriting the blob blind would flush the pending_writes queue.
+async function fetchTodoData() {
+  if (!PULSE_TOKEN) return { ok: true, data: null };
+  try {
+    const res = await fetch(`${PULSE_URL}/api/widgets/todo`, {
+      headers: { Authorization: `Bearer ${PULSE_TOKEN}` },
+    });
+    if (res.status === 404) return { ok: true, data: null };
+    if (!res.ok) return { ok: false };
+    const w = await res.json();
+    return { ok: true, data: w?.data ?? null };
+  } catch {
+    return { ok: false };
+  }
 }
 
 // ── Transform bitable rows → widget data shapes ───────────────────────────
-// Row shape from lark-cli: [Task, Due|null, Priority:[P], Status:[S], Type:[T]]
+// records = [{row: [Task, Due, Priority, Status, Type, SchedStart, SchedEnd], record_id}]
 // Type splits rows into two cards: 'Task' → todo, 'Reminder' → reminder.
 // Other types (e.g. Reading) aren't shown.
 const first = (v) => (Array.isArray(v) ? v[0] : v);
 
-function pending(rows, type) {
-  return rows.filter((row) => first(row[3]) !== 'Done' && first(row[4]) === type);
+const DONE_LIMIT = 20; // cap the sunken done section — "recently completed", not a log
+
+function pending(records, type) {
+  return records.filter(({ row }) => first(row[3]) !== 'Done' && first(row[4]) === type);
 }
 
-// todo contract: { pending_count, items: [{title, due, priority}] }
-function toTodo(rows) {
-  const items = pending(rows, 'Task')
-    .map((row) => ({
-      title: row[0] ?? '(untitled)',
-      due: row[1] ?? null,
-      priority: first(row[2]) ?? 'P2',
-    }))
-    .sort((a, b) => {
-      // Priority first (P0 < P1 < P2 < P3), then due date (nulls last)
-      const pa = a.priority?.replace('P', '') ?? '9';
-      const pb = b.priority?.replace('P', '') ?? '9';
-      if (pa !== pb) return Number(pa) - Number(pb);
-      if (!a.due) return 1;
-      if (!b.due) return -1;
-      return a.due < b.due ? -1 : 1;
+function byPriorityThenDue(a, b) {
+  const pa = a.priority?.replace('P', '') ?? '9';
+  const pb = b.priority?.replace('P', '') ?? '9';
+  if (pa !== pb) return Number(pa) - Number(pb);
+  if (!a.due) return 1;
+  if (!b.due) return -1;
+  return a.due < b.due ? -1 : 1;
+}
+
+// todo contract: { pending_count, items: [{id, title, due, priority, status,
+//   done?, pending?, prev_status?, sync_failed?}], done_items?: [...],
+//   pending_writes? }
+// Feishu Status is truth; local flags only bridge the gap until the write lands.
+function toTodo(records, local, acked, failed) {
+  const localById = new Map();
+  for (const list of [local?.items, local?.done_items]) {
+    if (Array.isArray(list)) for (const it of list) if (it?.id) localById.set(it.id, it);
+  }
+  // Rids with a write still in the drained queue (acked or failed this round) —
+  // distinct from local flags that may have been superseded by a newer toggle.
+  const queuedIds = new Set(
+    (Array.isArray(local?.pending_writes) ? local.pending_writes : [])
+      .map((w) => w?.record_id)
+      .filter(Boolean),
+  );
+
+  const items = pending(records, 'Task')
+    .map(({ row, record_id: id }) => {
+      const prev = localById.get(id);
+      const it = {
+        id,
+        title: row[0] ?? '(untitled)',
+        due: row[1] ?? null,
+        priority: first(row[2]) ?? 'P2',
+        status: first(row[3]), // real Feishu status — undo writes this back
+      };
+      // Locally-marked done but Feishu still shows it unfinished: only keep the
+      // sunken state while its write is actually in flight or just failed —
+      // otherwise the queue was superseded (rapid toggles collapse to the
+      // latest entry) and Feishu's "not Done" is the truth to render.
+      const stillQueued = queuedIds.has(id);
+      if (prev?.done && (stillQueued || failed.has(id))) {
+        it.done = true;
+        if (prev.prev_status) it.prev_status = prev.prev_status;
+        it.pending = true;
+        if (failed.has(id)) it.sync_failed = true;
+      }
+      return it;
+    })
+    .sort(byPriorityThenDue);
+
+  // Feishu-side completions. Merge EVERY Done row first (local undo may
+  // resurrect a row outside the cap), then keep the last DONE_LIMIT as the
+  // sunken "recently completed" section — a cap, not a log.
+  const mergedDone = records
+    .filter(({ row }) => first(row[3]) === 'Done' && first(row[4]) === 'Task')
+    .map(({ row, record_id: id }) => {
+      const prev = localById.get(id);
+      const it = {
+        id,
+        title: row[0] ?? '(untitled)',
+        due: row[1] ?? null,
+        priority: first(row[2]) ?? 'P2',
+        status: 'Done',
+        done: true,
+      };
+      // Keep prev_status so an undo can restore the pre-done Feishu status.
+      if (prev?.prev_status) it.prev_status = prev.prev_status;
+      if (prev && prev.done === false && (queuedIds.has(id) || failed.has(id))) {
+        it.done = false;
+        it.pending = true;
+        if (failed.has(id)) it.sync_failed = true;
+      }
+      return it;
     });
-  return { pending_count: items.length, items };
+  const sunken = mergedDone.filter((it) => it.done).slice(-DONE_LIMIT);
+  items.push(...mergedDone.filter((it) => !it.done));
+  items.sort(byPriorityThenDue);
+
+  // Keep only writes this round failed — acked ones are done, and a row that
+  // no longer exists in Feishu simply drops out with its queue entry.
+  const pending_writes = (Array.isArray(local?.pending_writes) ? local.pending_writes : [])
+    .filter((w) => w?.record_id && failed.has(w.record_id));
+
+  return {
+    pending_count: items.filter((it) => !it.done).length,
+    items,
+    ...(sunken.length ? { done_items: sunken } : {}),
+    ...(pending_writes.length ? { pending_writes } : {}),
+  };
 }
 
 // reminder contract: { items: [{title, due}] } — every pending reminder with a
 // due date; the card itself narrows to the 3-day window at render time so the
 // cutoff stays correct between syncs.
-function toReminder(rows) {
-  const items = pending(rows, 'Reminder')
-    .filter((row) => row[1])
-    .map((row) => ({ title: row[0] ?? '(untitled)', due: row[1] }))
+function toReminder(records) {
+  const items = pending(records, 'Reminder')
+    .filter(({ row }) => row[1])
+    .map(({ row }) => ({ title: row[0] ?? '(untitled)', due: row[1] }))
     .sort((a, b) => (a.due < b.due ? -1 : 1));
   return { items };
 }
@@ -123,10 +264,10 @@ function toReminder(rows) {
 // regardless of Type: talks/interviews often aren't Type=Task but still belong
 // on today's timeline. Sorting / "now" highlighting happens client-side so the
 // card stays correct between 5-min syncs without re-pushing.
-function toSchedule(rows) {
-  const events = rows
-    .filter((row) => first(row[3]) === 'Doing' && row[5] && row[6])
-    .map((row) => ({ title: row[0] ?? '(untitled)', start: row[5], end: row[6] }))
+function toSchedule(records) {
+  const events = records
+    .filter(({ row }) => first(row[3]) === 'Doing' && row[5] && row[6])
+    .map(({ row }) => ({ title: row[0] ?? '(untitled)', start: row[5], end: row[6] }))
     .sort((a, b) => (a.start < b.start ? -1 : 1));
   return { events };
 }
@@ -150,16 +291,26 @@ async function push(id, title, data) {
 
 // ── Main ──────────────────────────────────────────────────────────────────
 try {
-  const rows = await fetchRecords();
-  console.log(`fetched ${rows.length} rows from bitable`);
-  const todo = toTodo(rows);
-  const reminder = toReminder(rows);
-  const schedule = toSchedule(rows);
-  console.log(`transformed → ${todo.pending_count} tasks, ${reminder.items.length} reminders, ${schedule.events.length} scheduled`);
+  const [records, todoRead] = await Promise.all([fetchRecords(), fetchTodoData()]);
+  console.log(`fetched ${records.length} rows from bitable`);
+  const localTodo = todoRead.ok ? todoRead.data : null;
+  const writes = Array.isArray(localTodo?.pending_writes) ? localTodo.pending_writes : [];
+  const { acked, failed } = await drainPendingWrites(writes);
+  if (writes.length) console.log(`pending_writes: ${acked.size} acked, ${failed.size} failed`);
+  const todo = toTodo(records, localTodo, acked, failed);
+  const reminder = toReminder(records);
+  const schedule = toSchedule(records);
+  console.log(`transformed → ${todo.pending_count} tasks (+${(todo.done_items ?? []).length} done), ${reminder.items.length} reminders, ${schedule.events.length} scheduled`);
   if (DRY_RUN) {
     console.log(JSON.stringify({ todo, reminder, schedule }, null, 2));
   } else {
-    console.log('pushed todo:', JSON.stringify(await push('todo', '飞书待办', todo)));
+    // A failed todo read means pending_writes may still hold unsent writes —
+    // pushing would overwrite the blob and flush the queue, so skip this card.
+    if (todoRead.ok) {
+      console.log('pushed todo:', JSON.stringify(await push('todo', '飞书待办', todo)));
+    } else {
+      console.warn('todo read failed — skipping todo push to preserve pending_writes');
+    }
     console.log('pushed reminder:', JSON.stringify(await push('reminder', 'Reminder', reminder)));
     console.log('pushed schedule:', JSON.stringify(await push('schedule', '今日安排', schedule)));
   }

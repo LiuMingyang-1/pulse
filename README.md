@@ -62,9 +62,24 @@ schedule.data = { "events": [{ "title": string,
                 client-side so it stays correct between syncs
 reminder.data = { "items": [{ "title": string, "due": ISO8601 }] }
                 card shows the next-3-days window
-todo.data     = { "pending_count": number,
-                  "items": [{ "title": string, "due": ISO8601,
-                              "priority": "P0"|"P1"|"P2" }] }
+todo.data     = { "pending_count": number,    // unfinished only
+                  "items": [{ "id"?: string,  // Feishu record_id; items without
+                                              // one render a static circle
+                              "title": string, "due": ISO8601,
+                              "priority": "P0"|"P1"|"P2",
+                              "status"?: string,    // current Feishu Status
+                              "done"?: bool,        // locally checked off
+                              "pending"?: bool,     // write-back queued
+                              "prev_status"?: string, // restored on undo
+                              "sync_failed"?: bool }],
+                  "done_items"?: [{ same shape }],  // Status=Done in Feishu,
+                                                    // sunken below the pager
+                  "pending_writes"?: [{ "record_id": string,
+                                       "status": string,
+                                       "requested_at": ISO8601 }] }
+                tapping a circle sinks the item into a grayed, struck-through
+                done section (tap again to undo); the browser POSTs the whole
+                blob and each sync drains `pending_writes` back to Feishu
 stocks.data   = { "total_pnl": number (USD, signed), "currency": "USD",
                   "positions": [{ "symbol": string, "shares": number,
                                   "pnl": number, "pct": number }] }
@@ -122,10 +137,21 @@ GET  /api/health                    → { ok, ts }
 GET  /api/widgets                   → [widget, ...]
 GET  /api/widgets/:id               → widget | 404
 POST /api/widgets/:id               → upsert (auth required)
+POST /api/todo/toggle               → flip a todo item {id, done} (auth required)
 POST /api/cron/run                  → run the stock fetch now (auth required)
 ```
 
 Authed routes take `Authorization: Bearer <AGENT_TOKEN>`.
+
+### Browser writes (todo check-off)
+
+Open the page once with `?token=<AGENT_TOKEN>` — the page stores it in
+`localStorage` and strips it from the address bar. After that, tapping a circle
+in 飞书待办 calls `POST /api/todo/toggle` (`{ "id", "done" }`, Bearer auth) —
+the Worker flips the item and queues a `pending_writes` entry in one
+read-modify-write; add the `?token=` URL to your home-screen bookmark. Without
+a token the circle still flips locally (with a shake hint) but the change is
+gone on refresh.
 
 POST body: `{ "data": <any JSON>, "title"?: string, "source"?: string }` —
 `data` is required; `title` falls back to the existing row's title; `source`
@@ -171,7 +197,9 @@ Both IDs come from the bitable URL:
 
 The script hits lark-cli as `user` by default (your OAuth login). To run as
 the app/bot instead — e.g. on a server without a user session — set
-`LARK_AS=bot`.
+`LARK_AS=bot`. It also drains the todo card's `pending_writes` queue each run,
+writing `Status` back via `lark-cli base +record-batch-update`, so check-offs
+in the browser reach Feishu within one sync cycle.
 
 To run it every 5 min on a Mac, copy
 `scripts/com.pulse.sync-feishu.plist.example` to

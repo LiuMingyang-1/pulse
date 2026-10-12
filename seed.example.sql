@@ -7,7 +7,17 @@
 --   reminder.data = { "items": [{ "title": string, "due": ISO8601 }] }
 --                   every pending reminder; the card shows the next-3-days window.
 --   todo.data     = { "pending_count": number,
---                     "items": [{ "title": string, "due": string (ISO8601), "priority": "P0"|"P1"|"P2" }] }
+--                     "items": [{ "id"?: string (Feishu record_id — items without
+--                                 one render a non-clickable circle; the fake ids
+--                                 below exist only to demo the tap-to-done UI
+--                                 locally, their pending_writes never get acked),
+--                                "title": string, "due": string (ISO8601),
+--                                "priority": "P0"|"P1"|"P2",
+--                                "status"?: string (current Feishu Status),
+--                                "done"?: bool, "pending"?: bool,
+--                                "prev_status"?: string, "sync_failed"?: bool }],
+--                     "done_items"?: [{ same shape, Status=Done in Feishu }],
+--                     "pending_writes"?: [{ "record_id", "status", "requested_at" }] }
 --   stocks.data   = { "total_pnl": number (USD, signed),
 --                     "currency": "USD",
 --                     "positions": [{ "symbol": string, "shares": number,
@@ -19,7 +29,7 @@ INSERT OR REPLACE INTO widgets (id, title, data, updated_at, source) VALUES
    '2026-10-09T01:30:00.000Z', 'manual'),
 
   ('todo', '飞书待办',
-   '{"pending_count":3,"items":[{"title":"Write the API design doc","due":"2026-10-10T18:00:00+08:00","priority":"P1"},{"title":"Renew domain example.com","due":"2026-10-15T00:00:00+08:00","priority":"P0"},{"title":"Reply to design review","due":"2026-10-09T18:00:00+08:00","priority":"P2"}]}',
+   '{"pending_count":3,"items":[{"id":"recFakeSeed001","title":"Write the API design doc","due":"2026-10-10T18:00:00+08:00","priority":"P1"},{"id":"recFakeSeed002","title":"Renew domain example.com","due":"2026-10-15T00:00:00+08:00","priority":"P0"},{"id":"recFakeSeed003","title":"Reply to design review","due":"2026-10-09T18:00:00+08:00","priority":"P2"}]}',
    '2026-10-09T02:10:00.000Z', 'manual'),
 
   ('reminder', 'Reminder',

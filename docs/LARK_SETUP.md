@@ -129,3 +129,11 @@ tail -f /tmp/pulse-sync-feishu.log
 
 So in everyday use: new items go in as `Inbox`, you promote to `Doing` and fill
 in the Scheduled times to put them on today's schedule, and `Done` hides them.
+
+## Write-back (todo check-off)
+
+Tapping a circle in the 飞书待办 card queues a `{record_id, status}` entry in
+`todo.data.pending_writes`. On each run the sync script drains that queue via
+`lark-cli base +record-batch-update` — no extra setup needed, same `LARK_AS`
+identity and tokens as the read path. Undoing a check-off writes the item's
+`prev_status` back the same way.
