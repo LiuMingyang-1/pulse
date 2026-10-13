@@ -1,5 +1,5 @@
 -- Migration: widgets table (see SPEC.md "Widget 数据格式")
--- Each widget is one row: id is the widget key ('schedule', 'todo', 'stocks'),
+-- Each widget is one row: id is the widget key ('schedule', 'todo', 'reminder'),
 -- data is a JSON blob whose shape is defined per-widget by the renderer/agent contract.
 CREATE TABLE widgets (
   id TEXT PRIMARY KEY,
