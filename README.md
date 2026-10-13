@@ -1,7 +1,7 @@
 # Pulse
 
 A self-hosted personal dashboard on Cloudflare Workers. Widget cards (iOS-style)
-are rendered from a D1 table — a cron pulls public data like US stock quotes,
+are rendered from a D1 table — a cron syncs a Feishu bitable,
 and agents (Hermes on NAS, Alma on Mac, anything that can POST) push private
 data like Lark todos to a token-authed API. View it in any browser, or "添加到
 主屏幕" on iPhone for a full-screen PWA.
@@ -20,7 +20,7 @@ me through setup end to end, asking for each secret/config value when you need
 it: (1) npm install, (2) wrangler login, (3) create a D1 database named
 pulse-db and paste its database_id into wrangler.toml, (4) apply the
 migration, (5) have me generate a random AGENT_TOKEN and set it as a secret,
-optionally set FINNHUB_API_KEY for the stocks widget, (6) npm run deploy,
+(6) npm run deploy,
 (7) verify the API works — GET /api/health, GET /api/widgets, and one real
 POST /api/widgets/:id round-trip (local seeding uses seed.example.sql), (8)
 help me add it to my iPhone home screen as a PWA. Read README.md first for
@@ -48,8 +48,7 @@ to know is in this README.
   falls through to `ASSETS`.
 - **Storage**: one D1 table `widgets` (`migrations/0001_widgets.sql`) — a row
   per widget holding its latest `data` JSON blob.
-- **Cron**: every 5 min (`*/5 * * * *`) fetches Finnhub quotes for the
-  `POSITIONS` list, computes P&L, upserts the `stocks` row.
+- **Cron**: every 5 min (`*/5 * * * *`) runs the Feishu sync (see below).
 
 ## Widget data contract
 
@@ -86,9 +85,6 @@ todo.data     = { "pending_count": number,    // unfinished only
                 tapping a circle sinks the item into a grayed, struck-through
                 done section (tap again to undo); the browser POSTs the whole
                 blob and each sync drains `pending_writes` back to Feishu
-stocks.data   = { "total_pnl": number (USD, signed), "currency": "USD",
-                  "positions": [{ "symbol": string, "shares": number,
-                                  "pnl": number, "pct": number }] }
 ```
 
 New widgets just need a new row + a renderer entry in `src/widgets/`.
@@ -101,7 +97,6 @@ npx wrangler login
 npx wrangler d1 create pulse-db          # paste database_id into wrangler.toml
 npx wrangler d1 migrations apply pulse-db --remote
 npx wrangler secret put AGENT_TOKEN      # bearer token for agent pushes — make it random
-npx wrangler secret put FINNHUB_API_KEY  # free key at finnhub.io (optional, stocks widget)
 npm run deploy
 ```
 
@@ -125,12 +120,12 @@ secrets under Settings → Secrets and variables → Actions:
 
 The workflow only redeploys the Worker — D1 schema changes still need a manual
 `npx wrangler d1 migrations apply pulse-db --remote`, and secrets
-(`AGENT_TOKEN`, `FINNHUB_API_KEY`) stay set via `wrangler secret put` as above.
+(`AGENT_TOKEN`, `FEISHU_APP_ID`, `FEISHU_APP_SECRET`) stay set via `wrangler secret put` as above.
 
 ## Local dev
 
 ```sh
-cp .dev.vars.example .dev.vars                    # fill in AGENT_TOKEN + FINNHUB_API_KEY
+cp .dev.vars.example .dev.vars                    # fill in AGENT_TOKEN
 npx wrangler d1 migrations apply pulse-db --local
 npx wrangler d1 execute pulse-db --local --file=./seed.example.sql
 npm run dev:worker                                # astro build + wrangler dev
@@ -144,7 +139,6 @@ GET  /api/widgets                   → [widget, ...]
 GET  /api/widgets/:id               → widget | 404
 POST /api/widgets/:id               → upsert (auth required)
 POST /api/todo/toggle               → flip a todo item {id, done} (auth required)
-POST /api/cron/run                  → run the stock fetch now (auth required)
 ```
 
 Authed routes take `Authorization: Bearer <AGENT_TOKEN>`.
@@ -184,7 +178,7 @@ curl -X POST https://<your-worker>.workers.dev/api/widgets/todo \
 ## Feishu / Lark sync (optional)
 
 **Recommended: in-Worker cron.** `src/feishu.ts` runs on the Worker's own
-`*/5` cron (in parallel with the stock update): it gets a `tenant_access_token`
+`*/5` cron: it gets a `tenant_access_token`
 from `FEISHU_APP_ID` / `FEISHU_APP_SECRET`, reads the bitable set in
 `wrangler.toml` `[vars]` (`FEISHU_BASE_TOKEN`, `FEISHU_TABLE_ID`), drains
 `todo.data.pending_writes` back to Feishu, and writes `todo` / `reminder` /
@@ -230,11 +224,6 @@ To run it every 5 min on a Mac, copy
 `~/Library/LaunchAgents/com.pulse.sync-feishu.plist`, fill in your paths and
 env vars, then `launchctl load` it.
 
-## Editing stock holdings
-
-`POSITIONS` at the top of `src/worker.ts` — symbol, shares, avg cost per share
-in USD. Edit and redeploy.
-
 ## iPhone
 
 Open the deployed URL in Safari → Share → 添加到主屏幕. `manifest.webmanifest`,
@@ -242,6 +231,5 @@ Open the deployed URL in Safari → Share → 添加到主屏幕. `manifest.webm
 
 ## Cost notes
 
-Everything fits comfortably in free tiers: Finnhub's 60 calls/min limit is fine
-for a handful of symbols every 5 min, and D1 reads/writes plus cron are well
+Everything fits comfortably in free tiers: D1 reads/writes plus cron are well
 under quota for a single-user dashboard.

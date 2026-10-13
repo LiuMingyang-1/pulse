@@ -6,7 +6,6 @@ export interface Env {
   ASSETS: Fetcher;
   DB: D1Database;
   AGENT_TOKEN: string;
-  FINNHUB_API_KEY?: string;
   FEISHU_APP_ID?: string;
   FEISHU_APP_SECRET?: string;
   FEISHU_BASE_TOKEN?: string;
@@ -22,98 +21,6 @@ interface WidgetRow {
 }
 
 const ALLOWED_SOURCES = new Set(['cron', 'hermes', 'alma', 'manual', 'agent', 'feishu-cron']);
-
-// ── Stock holdings ─────────────────────────────────────────────────────────
-// SAMPLE HOLDINGS — edit these to match your real positions.
-// `avg_cost` is your cost basis per share in USD.
-const POSITIONS: Array<{ symbol: string; shares: number; avg_cost: number }> = [
-  { symbol: 'AAPL', shares: 10, avg_cost: 185.2 },
-  { symbol: 'NVDA', shares: 5, avg_cost: 128.5 },
-  { symbol: 'VOO', shares: 3, avg_cost: 511.4 },
-];
-
-interface StockUpdateResult {
-  ok: boolean;
-  reason?: string;
-  fetched: number;
-  failed: string[];
-  data?: {
-    total_pnl: number;
-    currency: 'USD';
-    positions: Array<{ symbol: string; shares: number; pnl: number; pct: number }>;
-  };
-}
-
-// Fetch quotes from Finnhub, compute P&L, upsert the `stocks` widget row.
-// Shared by the cron `scheduled` handler and POST /api/cron/run.
-// Never throws — callers can fire-and-forget inside ctx.waitUntil.
-async function runStockUpdate(env: Env): Promise<StockUpdateResult> {
-  const apiKey = env.FINNHUB_API_KEY;
-  if (!apiKey) {
-    console.log('[stocks] FINNHUB_API_KEY not set — skipping fetch');
-    return { ok: false, reason: 'no_api_key', fetched: 0, failed: [] };
-  }
-
-  const round2 = (n: number) => Math.round(n * 100) / 100;
-
-  const positions: Array<{
-    symbol: string;
-    shares: number;
-    pnl: number;
-    pct: number;
-  }> = [];
-  const failed: string[] = [];
-
-  for (const pos of POSITIONS) {
-    try {
-      const res = await fetch(
-        `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(pos.symbol)}&token=${apiKey}`,
-      );
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const quote = (await res.json()) as { c?: number };
-      const current = quote.c;
-      if (typeof current !== 'number' || !Number.isFinite(current) || current <= 0) {
-        throw new Error('bad quote payload');
-      }
-      const pnl = (current - pos.avg_cost) * pos.shares;
-      const pct = ((current - pos.avg_cost) / pos.avg_cost) * 100;
-      positions.push({
-        symbol: pos.symbol,
-        shares: pos.shares,
-        pnl: round2(pnl),
-        pct: round2(pct),
-      });
-    } catch (err) {
-      console.error(`[stocks] fetch failed for ${pos.symbol}:`, err);
-      failed.push(pos.symbol);
-    }
-  }
-
-  // Don't clobber good data with an empty write if every fetch failed.
-  if (positions.length === 0) {
-    console.error('[stocks] all symbol fetches failed — widget not updated');
-    return { ok: false, reason: 'all_failed', fetched: 0, failed };
-  }
-
-  const data = {
-    total_pnl: round2(positions.reduce((sum, p) => sum + p.pnl, 0)),
-    currency: 'USD' as const,
-    positions,
-  };
-
-  await env.DB.prepare(
-    `INSERT INTO widgets (id, title, data, updated_at, source)
-     VALUES ('stocks', '美股持仓', ?, ?, 'cron')
-     ON CONFLICT(id) DO UPDATE SET
-       data = excluded.data,
-       updated_at = excluded.updated_at,
-       source = excluded.source`,
-  )
-    .bind(JSON.stringify(data), new Date().toISOString())
-    .run();
-
-  return { ok: true, fetched: positions.length, failed, data };
-}
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -343,17 +250,6 @@ app.post('/api/todo/toggle', requireAuth, async (c) => {
   });
 });
 
-// POST /api/cron/run — manually trigger the stock update (same logic as the
-// cron trigger) so it can be tested without waiting for the schedule.
-// Same Bearer auth as the widget push endpoint.
-app.post('/api/cron/run', requireAuth, async (c) => {
-  const result = await runStockUpdate(c.env);
-  // no_api_key is a config state, not an upstream failure — report 200 with
-  // the reason so `curl` testing shows a clean JSON body instead of an error.
-  const status = result.ok || result.reason === 'no_api_key' ? 200 : 502;
-  return c.json(result, status);
-});
-
 // POST /api/feishu/sync — run the Feishu bitable sync now (same as cron).
 app.post('/api/feishu/sync', requireAuth, async (c) => {
   const result = await runFeishuSync(c.env);
@@ -376,14 +272,6 @@ export default {
     env: Env,
     ctx: ExecutionContext,
   ): Promise<void> {
-    ctx.waitUntil(
-      runStockUpdate(env).catch((err) => {
-        // Belt-and-suspenders: runStockUpdate never throws, but a rejected
-        // waitUntil promise would surface as a cron failure — never let it.
-        console.error('[stocks] unexpected error in scheduled run:', err);
-      }),
-    );
-    // Feishu sync runs in parallel and is isolated from the stock update.
     ctx.waitUntil(
       runFeishuSync(env).catch((err) => {
         console.error('[feishu] unexpected error in scheduled run:', err?.message ?? err);

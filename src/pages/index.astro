@@ -32,6 +32,8 @@ import Layout from '../layouts/Layout.astro';
 
     const cardsEl = document.getElementById('cards')!;
     const known = new Map(registry.map((d) => [d.id, d]));
+    // Retired widgets: their old D1 rows may linger — never render them.
+    const RETIRED = new Set(['stocks']);
 
     const defFor = (id: string, title?: string): WidgetDef =>
       known.get(id) ?? { ...generic, id, title: title ?? id };
@@ -179,7 +181,7 @@ import Layout from '../layouts/Layout.astro';
         }
         paint(d, byId.get(d.id));
       });
-      widgets.filter((w) => !known.has(w.id)).forEach((w) => paint(defFor(w.id, w.title), w));
+      widgets.filter((w) => !known.has(w.id) && !RETIRED.has(w.id)).forEach((w) => paint(defFor(w.id, w.title), w));
     }
 
     function tick() {

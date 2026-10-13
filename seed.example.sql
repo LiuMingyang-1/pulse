@@ -23,10 +23,6 @@
 --                                       stamps it on first observation of the
 --                                       Done state }],
 --                     "pending_writes"?: [{ "record_id", "status", "requested_at" }] }
---   stocks.data   = { "total_pnl": number (USD, signed),
---                     "currency": "USD",
---                     "positions": [{ "symbol": string, "shares": number,
---                                     "pnl": number (signed USD), "pct": number (signed %) }] }
 
 INSERT OR REPLACE INTO widgets (id, title, data, updated_at, source) VALUES
   ('schedule', '今日安排',
@@ -39,8 +35,4 @@ INSERT OR REPLACE INTO widgets (id, title, data, updated_at, source) VALUES
 
   ('reminder', 'Reminder',
    '{"items":[{"title":"Water the plants","due":"2026-10-10T09:00:00+08:00"},{"title":"Take out recycling","due":"2026-10-11T20:00:00+08:00"}]}',
-   '2026-10-09T02:10:00.000Z', 'manual'),
-
-  ('stocks', '美股持仓',
-   '{"total_pnl":1243.87,"currency":"USD","positions":[{"symbol":"AAPL","shares":10,"pnl":482.30,"pct":21.4},{"symbol":"NVDA","shares":5,"pnl":-156.20,"pct":-3.8},{"symbol":"VOO","shares":3,"pnl":917.77,"pct":12.6}]}',
-   '2026-10-09T02:05:00.000Z', 'cron');
+   '2026-10-09T02:10:00.000Z', 'manual');
