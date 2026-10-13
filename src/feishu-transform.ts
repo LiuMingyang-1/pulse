@@ -105,6 +105,12 @@ function pending(records: FeishuRecord[], type: string) {
   return records.filter(({ row }) => first(row[3]) !== 'Done' && first(row[4]) === type);
 }
 
+// 'P0' → 0 … 'P3' → 3; missing/unparsable sinks to 9.
+function priorityRank(p: string | undefined): number {
+  const n = Number(p?.replace('P', '') ?? '9');
+  return Number.isFinite(n) ? n : 9;
+}
+
 function byPriorityThenDue(a: TodoItem, b: TodoItem): number {
   const pa = a.priority?.replace('P', '') ?? '9';
   const pb = b.priority?.replace('P', '') ?? '9';
@@ -199,8 +205,18 @@ export function toReminder(records: FeishuRecord[]) {
 export function toSchedule(records: FeishuRecord[], now: Date = new Date()) {
   const events = records
     .filter(({ row }) => first(row[3]) === 'Doing' && row[5] && row[6] && isTodayDate(row[5], now))
-    .map(({ row }) => ({ title: str(row[0]) ?? '(untitled)', start: str(row[5]) as string, end: str(row[6]) as string }))
-    .sort((a, b) => (a.start < b.start ? -1 : 1));
+    .map(({ row }) => ({
+      title: str(row[0]) ?? '(untitled)',
+      start: str(row[5]) as string,
+      end: str(row[6]) as string,
+      priority: first(row[2]) ?? 'P2',
+    }))
+    .sort((a, b) => {
+      // Same start → higher priority (smaller P number) first; same semantics
+      // as byPriorityThenDue. Equal keys return 0 to keep the sort consistent.
+      if (a.start !== b.start) return a.start < b.start ? -1 : 1;
+      return priorityRank(a.priority) - priorityRank(b.priority);
+    });
   return { events };
 }
 

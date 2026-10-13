@@ -135,6 +135,19 @@ describe('toReminder / toSchedule', () => {
     expect(ev.map((e) => e.title)).toEqual(['early', 'late']);
     expect(ev[0].start).toBe('2026-10-13T09:00:00.000+08:00');
   });
+  it('schedule: same start → higher priority first, default P2, stable on ties', () => {
+    const S = ms('2026-10-13T07:00:00Z'), E = ms('2026-10-13T10:00:00Z');
+    const recs = [
+      rec('1', { Task: 'p3', Priority: 'P3', Status: 'Doing', 'Scheduled Start': S, 'Scheduled End': E }),
+      rec('2', { Task: 'none', Status: 'Doing', 'Scheduled Start': S, 'Scheduled End': E }),
+      rec('3', { Task: 'p0', Priority: 'P0', Status: 'Doing', 'Scheduled Start': S, 'Scheduled End': E }),
+      rec('4', { Task: 'p2a', Priority: 'P2', Status: 'Doing', 'Scheduled Start': S, 'Scheduled End': E }),
+      rec('5', { Task: 'earlier', Priority: 'P3', Status: 'Doing', 'Scheduled Start': ms('2026-10-13T06:00:00Z'), 'Scheduled End': E }),
+    ];
+    const ev = toSchedule(recs, NOW).events;
+    expect(ev.map((e) => e.title)).toEqual(['earlier', 'p0', 'none', 'p2a', 'p3']);
+    expect(ev.find((e) => e.title === 'none')!.priority).toBe('P2');
+  });
 });
 
 describe('buildBatchUpdate', () => {
