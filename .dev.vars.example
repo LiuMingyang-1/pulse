@@ -22,3 +22,7 @@ LARK_TABLE_ID=
 PULSE_URL=
 # PULSE_TOKEN=
 # PULSE_SOURCE=
+
+# Feishu sync inside the Worker (src/feishu.ts). Base/table ids live in wrangler.toml [vars].
+FEISHU_APP_ID=
+FEISHU_APP_SECRET=

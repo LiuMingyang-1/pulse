@@ -13,5 +13,11 @@ database_name = "pulse-db"
 database_id = "03fa6d2c-ff7e-4302-babb-189dc7242f7a"
 migrations_dir = "migrations"
 
+# Feishu bitable for the todo/reminder/schedule sync (not secret).
+# FEISHU_APP_ID / FEISHU_APP_SECRET are secrets: `wrangler secret put`.
+[vars]
+FEISHU_BASE_TOKEN = "KkKJbeFuaayQHysyH1Wc9frRnPe"
+FEISHU_TABLE_ID = "tbl9BFvxgcbQgJ5D"
+
 [triggers]
 crons = ["*/5 * * * *"]
