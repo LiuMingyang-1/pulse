@@ -125,7 +125,8 @@ tail -f /tmp/pulse-sync-feishu.log
 - **`Type=Reminder`, `Status≠Done`, has `Due`** → `reminder` widget (card
   filters to next 3 days client-side)
 - **`Type=Task`, `Status=Doing`, both `Scheduled Start` and `Scheduled End`
-  set** → `schedule` widget (today's slotted events)
+  set, and `Scheduled Start` falls on today** → `schedule` widget (today's
+  slotted events; a Doing row slated for a future day waits until its day)
 
 So in everyday use: new items go in as `Inbox`, you promote to `Doing` and fill
 in the Scheduled times to put them on today's schedule, and `Done` hides them.
