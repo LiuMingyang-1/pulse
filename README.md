@@ -183,7 +183,25 @@ curl -X POST https://<your-worker>.workers.dev/api/widgets/todo \
 
 ## Feishu / Lark sync (optional)
 
-`scripts/sync-feishu.mjs` pulls tasks from a Feishu bitable via
+**Recommended: in-Worker cron.** `src/feishu.ts` runs on the Worker's own
+`*/5` cron (in parallel with the stock update): it gets a `tenant_access_token`
+from `FEISHU_APP_ID` / `FEISHU_APP_SECRET`, reads the bitable set in
+`wrangler.toml` `[vars]` (`FEISHU_BASE_TOKEN`, `FEISHU_TABLE_ID`), drains
+`todo.data.pending_writes` back to Feishu, and writes `todo` / `reminder` /
+`schedule` straight into D1 (`source = 'feishu-cron'`). No host needs to stay
+awake. Setup (Feishu app permissions + secrets) is in
+[docs/LARK_SETUP.md](docs/LARK_SETUP.md#option-a--worker-cron-recommended).
+
+```sh
+npx wrangler secret put FEISHU_APP_ID
+npx wrangler secret put FEISHU_APP_SECRET
+# trigger once without waiting for cron:
+curl -X POST -H "Authorization: Bearer $AGENT_TOKEN" https://<worker>/api/feishu/sync
+```
+
+Don't run the Worker cron and the external script at the same time.
+
+**Fallback: external script.** `scripts/sync-feishu.mjs` pulls tasks from a Feishu bitable via
 [lark-cli](https://github.com/jeking2/lark-cli) and pushes the `todo`,
 `reminder`, and `schedule` widgets. Run it on whatever host has your Feishu
 credentials (your Mac, a NAS — anywhere), not in the Worker.

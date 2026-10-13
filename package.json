@@ -8,7 +8,9 @@
     "build": "astro build",
     "dev:worker": "astro build && wrangler dev",
     "deploy": "astro build && wrangler deploy",
-    "preview": "wrangler dev"
+    "preview": "wrangler dev",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "astro": "^5.0.0",
@@ -17,6 +19,7 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^5.0.0",
     "typescript": "^5.0.0",
+    "vitest": "^5.0.4",
     "wrangler": "^4.0.0"
   }
 }

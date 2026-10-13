@@ -1,11 +1,16 @@
 import { Hono } from 'hono';
 import type { MiddlewareHandler } from 'hono';
+import { runFeishuSync } from './feishu';
 
 export interface Env {
   ASSETS: Fetcher;
   DB: D1Database;
   AGENT_TOKEN: string;
   FINNHUB_API_KEY?: string;
+  FEISHU_APP_ID?: string;
+  FEISHU_APP_SECRET?: string;
+  FEISHU_BASE_TOKEN?: string;
+  FEISHU_TABLE_ID?: string;
 }
 
 interface WidgetRow {
@@ -16,7 +21,7 @@ interface WidgetRow {
   source: string | null;
 }
 
-const ALLOWED_SOURCES = new Set(['cron', 'hermes', 'alma', 'manual', 'agent']);
+const ALLOWED_SOURCES = new Set(['cron', 'hermes', 'alma', 'manual', 'agent', 'feishu-cron']);
 
 // ── Stock holdings ─────────────────────────────────────────────────────────
 // SAMPLE HOLDINGS — edit these to match your real positions.
@@ -349,6 +354,13 @@ app.post('/api/cron/run', requireAuth, async (c) => {
   return c.json(result, status);
 });
 
+// POST /api/feishu/sync — run the Feishu bitable sync now (same as cron).
+app.post('/api/feishu/sync', requireAuth, async (c) => {
+  const result = await runFeishuSync(c.env);
+  const status = result.ok || result.reason === 'not_configured' ? 200 : 502;
+  return c.json(result, status);
+});
+
 app.all('/api/*', (c) => {
   return c.json({ error: 'not_found' }, 404);
 });
@@ -369,6 +381,12 @@ export default {
         // Belt-and-suspenders: runStockUpdate never throws, but a rejected
         // waitUntil promise would surface as a cron failure — never let it.
         console.error('[stocks] unexpected error in scheduled run:', err);
+      }),
+    );
+    // Feishu sync runs in parallel and is isolated from the stock update.
+    ctx.waitUntil(
+      runFeishuSync(env).catch((err) => {
+        console.error('[feishu] unexpected error in scheduled run:', err?.message ?? err);
       }),
     );
   },

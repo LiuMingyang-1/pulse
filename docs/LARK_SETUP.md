@@ -1,11 +1,42 @@
 # Feishu / Lark bitable setup for Pulse
 
-The `todo`, `reminder`, and `schedule` widgets are fed by `scripts/sync-feishu.mjs`,
-which reads a Feishu bitable (多维表格) and pushes the data to your Pulse worker.
+The `todo`, `reminder`, and `schedule` widgets are fed from a Feishu bitable —
+either by the Worker's own cron (Option A) or by `scripts/sync-feishu.mjs` (Option B), which reads a Feishu bitable (多维表格) and pushes the data to your Pulse worker.
 This doc walks through getting that bitable into a usable state.
 
 It is written to be followable by a coding agent — if you're setting this up by
 hand, the same steps apply, just run the commands yourself.
+
+## Option A — Worker cron (recommended)
+
+The Worker syncs the bitable itself every 5 minutes (`src/feishu.ts`), using
+the Feishu app's bot (tenant) identity. Steps 0–4 below (lark-cli + launchd)
+are only needed for the fallback script.
+
+1. 飞书开放平台 → 你的应用（企业自建应用）→ **权限管理**，开通多维表格记录读写：
+   `base:record:read`、`base:record:update`（后台若显示旧名，则开
+   `bitable:app`，它同时包含读写）。
+2. **应用能力** 中确认已启用「机器人」。
+3. **版本管理与发布** → 创建版本 → 发布（需要审核则等管理员通过）。权限只在发布后生效。
+4. 打开 Tasks 多维表格 → 右上角「…」→「更多」→「添加文档应用」，搜索该应用，授予
+   **可编辑** 权限（只读会导致勾选回写失败）。
+5. 设置 Worker secrets（交互输入，不要写进命令行/仓库）：
+
+   ```sh
+   npx wrangler secret put FEISHU_APP_ID
+   npx wrangler secret put FEISHU_APP_SECRET
+   ```
+
+   `FEISHU_BASE_TOKEN` / `FEISHU_TABLE_ID` 是普通变量，在 `wrangler.toml` 的 `[vars]` 里改。
+6. 验证：`curl -X POST -H "Authorization: Bearer <AGENT_TOKEN>" https://<worker>/api/feishu/sync`
+   应返回 `{"ok":true,"fetched":N,...}`。`code 99991672` = 权限未开通/未发布；
+   `91403`/`1254302` 一类 = 应用没被加到这张多维表格。
+   `npx wrangler tail` 可看 `[feishu]` 日志。
+7. 停掉任何还在跑 `scripts/sync-feishu.mjs` 的定时任务，避免两边同时写。
+
+Field contract below (Step 1 table) applies to both options.
+
+## Option B — external script (fallback)
 
 ## Step 0 — install + auth lark-cli
 
