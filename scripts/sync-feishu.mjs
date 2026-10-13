@@ -168,20 +168,23 @@ const first = (v) => (Array.isArray(v) ? v[0] : v);
 
 const DONE_LIMIT = 20; // cap the sunken done section — "completed today", not a log
 
-// Does an ISO timestamp fall on today? "Today" = local date on the sync host
-// (it runs in the user's timezone). completed_at is always written by us as
-// Date#toISOString, so no epoch-ms/localized formats to handle — missing or
-// unparseable counts as NOT today so the row drops from done_items.
+// "Today" is always Asia/Shanghai — the user's timezone, NOT whatever machine
+// the sync happens to run on (a UTC host would otherwise shift the day
+// boundary by 8h). `en-CA` yields "YYYY-MM-DD" for cheap string compares.
+const USER_TZ = 'Asia/Shanghai';
+const dayFmt = new Intl.DateTimeFormat('en-CA', { timeZone: USER_TZ });
+const localDay = (d) => dayFmt.format(d);
+const todayStr = () => localDay(new Date());
+
+// Does an ISO timestamp fall on today (Shanghai)? completed_at is always
+// written by us as Date#toISOString; scheduled times come from lark-cli as
+// offset-bearing ISO ("2026-10-14T15:00:00.000+08:00"). Missing/unparseable
+// counts as NOT today so the row drops out of day-scoped sections.
 function isTodayDate(isoString) {
   if (typeof isoString !== 'string' || isoString.trim() === '') return false;
   const d = new Date(isoString);
   if (Number.isNaN(d.getTime())) return false;
-  const now = new Date();
-  return (
-    d.getFullYear() === now.getFullYear() &&
-    d.getMonth() === now.getMonth() &&
-    d.getDate() === now.getDate()
-  );
+  return localDay(d) === todayStr();
 }
 
 function pending(records, type) {
@@ -314,11 +317,17 @@ function toReminder(records) {
 // schedule contract: { events: [{title, start, end}] } — every record decided
 // for today (Status=Doing) AND actually slotted (both Scheduled times present),
 // regardless of Type: talks/interviews often aren't Type=Task but still belong
-// on today's timeline. Sorting / "now" highlighting happens client-side so the
-// card stays correct between 5-min syncs without re-pushing.
+// on today's timeline. The Scheduled Start must also fall on today — a Doing
+// row slated for a future day (planned ahead) stays out of 今日安排 until its
+// day arrives, so the card never mixes tomorrow's events into today's list.
+// Sorting / "now" highlighting happens client-side so the card stays correct
+// between 5-min syncs without re-pushing.
 function toSchedule(records) {
   const events = records
-    .filter(({ row }) => first(row[3]) === 'Doing' && row[5] && row[6])
+    .filter(
+      ({ row }) =>
+        first(row[3]) === 'Doing' && row[5] && row[6] && isTodayDate(row[5]),
+    )
     .map(({ row }) => ({ title: row[0] ?? '(untitled)', start: row[5], end: row[6] }))
     .sort((a, b) => (a.start < b.start ? -1 : 1));
   return { events };
