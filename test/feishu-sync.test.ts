@@ -30,7 +30,7 @@ function fakeDB(initial: Record<string, { data: string; updated_at: string }>, o
 
 const env = (DB: any) => ({ DB, FEISHU_APP_ID: 'id', FEISHU_APP_SECRET: 's', FEISHU_BASE_TOKEN: 'b', FEISHU_TABLE_ID: 't' });
 
-function mockFetch(batchCode = 0, opts: { staleReadBack?: boolean } = {}) {
+function mockFetch(batchCode = 0, opts: { staleWide?: boolean } = {}) {
   const calls: { url: string; body: any }[] = [];
   vi.stubGlobal('fetch', vi.fn(async (url: string, init: any) => {
     const body = init?.body ? JSON.parse(init.body) : null;
@@ -41,14 +41,9 @@ function mockFetch(batchCode = 0, opts: { staleReadBack?: boolean } = {}) {
       const second = url.includes('page_token=p2');
       return j({ code: 0, data: second
         ? { items: [{ record_id: 'r2', fields: { Task: 'two', Status: 'Inbox', Type: 'Task' } }], has_more: false }
-        : { items: [{ record_id: 'r1', fields: { Task: [{ text: 'one' }], Status: 'Doing', Type: 'Task' } }], has_more: true, page_token: 'p2' } });
+        : { items: [{ record_id: 'r1', fields: { Task: [{ text: 'one' }], Status: opts.staleWide ? 'Doing' : 'Done', Type: 'Task' } }], has_more: true, page_token: 'p2' } });
     }
     if (url.includes('batch_update')) return j({ code: batchCode, msg: batchCode ? 'nope' : 'ok' });
-    // Single-record read-back: pretend the write landed unless staleReadBack.
-    const get = url.match(/records\/([\w-]+)\?field_names=Status/);
-    if (get) {
-      return j({ code: 0, data: { record: { record_id: get[1], fields: { Status: opts.staleReadBack ? 'Doing' : 'Done' } } } });
-    }
     return new Response('?', { status: 404 });
   }));
   return calls;
@@ -63,36 +58,56 @@ describe('runFeishuSync', () => {
 
   it('paginates, drains writes with string select, writes widgets', async () => {
     const calls = mockFetch();
-    const db = fakeDB({ todo: { data: JSON.stringify({ items: [{ id: 'r1', done: true, pending: true }], pending_writes: [{ record_id: 'r1', status: 'Done' }] }), updated_at: 'T0' } });
+    const db = fakeDB({ todo: { data: JSON.stringify({ items: [{ id: 'r1', done: true, pending: true, completed_at: new Date().toISOString() }], pending_writes: [{ record_id: 'r1', status: 'Done' }] }), updated_at: 'T0' } });
     const r = await runFeishuSync(env(db) as any);
-    expect(r).toMatchObject({ ok: true, fetched: 2, writes: { acked: 1, failed: 0 }, todo: 'written' });
+    expect(r).toMatchObject({ ok: true, fetched: 2, writes: { acked: 1, failed: 0, unverified: 0 }, todo: 'written' });
     expect(calls.find((c) => c.url.includes('batch_update'))!.body).toEqual({ records: [{ record_id: 'r1', fields: { Status: 'Done' } }] });
     const todo = JSON.parse(db.rows.todo.data);
     expect(todo.pending_writes).toBeUndefined();
-    expect(todo.items.map((i: any) => i.title)).toEqual(['one', 'two']);
+    // r1's write is visible in the wide read → sinks into done_items.
+    expect(todo.items.map((i: any) => i.title)).toEqual(['two']);
+    expect(todo.done_items.map((i: any) => i.id)).toEqual(['r1']);
     expect(db.rows.reminder && db.rows.schedule).toBeTruthy();
   });
 
   it('keeps failed writes', async () => {
-    mockFetch(1254000);
+    // Write never landed, so the index keeps showing the old Status.
+    mockFetch(1254000, { staleWide: true });
     const db = fakeDB({ todo: { data: JSON.stringify({ items: [{ id: 'r1', done: true }], pending_writes: [{ record_id: 'r1', status: 'Done' }] }), updated_at: 'T0' } });
     const r = await runFeishuSync(env(db) as any);
-    expect(r.writes).toEqual({ acked: 0, failed: 1 });
+    expect(r.writes).toEqual({ acked: 0, failed: 1, unverified: 0 });
     const todo = JSON.parse(db.rows.todo.data);
     expect(todo.pending_writes).toHaveLength(1);
     expect(todo.items.find((i: any) => i.id === 'r1').sync_failed).toBe(true);
   });
 
-  it('stale read-back requeues the write and keeps local done', async () => {
-    // batch_update succeeded but the narrow read-back still shows 'Doing' —
-    // the write isn't visible yet, so the todo must not snap back to undone.
-    mockFetch(0, { staleReadBack: true });
+  it('stale wide read keeps the write queued and the local done flag', async () => {
+    // batch_update succeeded but records/search still shows 'Doing' — the
+    // index hasn't caught up. The item must stay done+pending (no failure
+    // ring) and the write must stay queued for next round's retry — this is
+    // the "勾选后刷新又变回未完成" regression.
+    mockFetch(0, { staleWide: true });
     const db = fakeDB({ todo: { data: JSON.stringify({ items: [{ id: 'r1', title: 'one', due: null, priority: 'P2', done: true, pending: true, prev_status: 'Doing' }], pending_writes: [{ record_id: 'r1', status: 'Done' }] }), updated_at: 'T0' } });
     const r = await runFeishuSync(env(db) as any);
-    expect(r.writes).toEqual({ acked: 0, failed: 1 });
+    expect(r.writes).toEqual({ acked: 0, failed: 0, unverified: 1 });
     const todo = JSON.parse(db.rows.todo.data);
     expect(todo.pending_writes).toEqual([{ record_id: 'r1', status: 'Done', requested_at: expect.any(String) }]);
-    expect(todo.items.find((i: any) => i.id === 'r1')).toMatchObject({ done: true, sync_failed: true });
+    expect(todo.items.find((i: any) => i.id === 'r1')).toMatchObject({ done: true, pending: true });
+    expect(todo.items.find((i: any) => i.id === 'r1').sync_failed).toBeUndefined();
+  });
+
+  it('second sync while the index still lags does not revert the item', async () => {
+    // The PR#7 hole: once a write was acked the queue emptied, so the NEXT
+    // sync with a still-stale read flipped the item back to undone. Now the
+    // unverified write survives round after round until the wide read agrees.
+    mockFetch(0, { staleWide: true });
+    const db = fakeDB({ todo: { data: JSON.stringify({ items: [{ id: 'r1', title: 'one', due: null, priority: 'P2', done: true, pending: true, prev_status: 'Doing' }], pending_writes: [{ record_id: 'r1', status: 'Done' }] }), updated_at: 'T0' } });
+    await runFeishuSync(env(db) as any);
+    const r2 = await runFeishuSync(env(db) as any);
+    expect(r2.writes).toEqual({ acked: 0, failed: 0, unverified: 1 });
+    const todo = JSON.parse(db.rows.todo.data);
+    expect(todo.items.find((i: any) => i.id === 'r1')).toMatchObject({ done: true, pending: true });
+    expect(todo.pending_writes).toHaveLength(1);
   });
 
   it('skips todo write if row changed concurrently', async () => {

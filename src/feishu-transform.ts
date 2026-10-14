@@ -134,6 +134,7 @@ export function toTodo(
   local: Partial<TodoData> | null | undefined,
   acked: Set<string>,
   failed: Set<string>,
+  unverified: Set<string>,
   nowIso: string,
 ): TodoData {
   const now = new Date(nowIso);
@@ -154,7 +155,11 @@ export function toTodo(
         priority: first(row[2]) ?? 'P2',
         status: first(row[3]),
       };
-      if (prev?.done && (queuedIds.has(id) || failed.has(id))) {
+      // Locally-marked done while Feishu still shows it unfinished: keep the
+      // sunken state as long as the write is in flight, unverified (index lag),
+      // or just failed. Only failed writes get the red ring — unverified is a
+      // normal multi-minute window, not an error.
+      if (prev?.done && (queuedIds.has(id) || failed.has(id) || unverified.has(id))) {
         it.done = true;
         if (prev.prev_status) it.prev_status = prev.prev_status;
         it.pending = true;
@@ -179,7 +184,7 @@ export function toTodo(
       if (prev?.completed_at) it.completed_at = prev.completed_at;
       else if (prev && prev.done !== true) it.completed_at = nowIso;
       if (prev?.prev_status) it.prev_status = prev.prev_status;
-      if (prev && prev.done === false && (queuedIds.has(id) || failed.has(id))) {
+      if (prev && prev.done === false && (queuedIds.has(id) || failed.has(id) || unverified.has(id))) {
         it.done = false;
         it.pending = true;
         if (failed.has(id)) it.sync_failed = true;
@@ -192,7 +197,12 @@ export function toTodo(
   items.push(...mergedDone.filter((it) => !it.done));
   items.sort(byDueThenPriority);
 
-  const pending_writes = localWrites.filter((w) => w?.record_id && failed.has(w.record_id));
+  // Writes stay queued while they're unsettled — API failure (failed) or the
+  // wide read hasn't confirmed the new Status yet (unverified). Verified acks
+  // drop out; a row gone from Feishu drops its entry with it.
+  const pending_writes = localWrites.filter(
+    (w) => w?.record_id && (failed.has(w.record_id) || unverified.has(w.record_id)),
+  );
 
   return {
     pending_count: items.filter((it) => !it.done).length,
