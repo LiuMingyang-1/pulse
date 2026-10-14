@@ -111,13 +111,22 @@ function priorityRank(p: string | undefined): number {
   return Number.isFinite(n) ? n : 9;
 }
 
-function byPriorityThenDue(a: TodoItem, b: TodoItem): number {
-  const pa = a.priority?.replace('P', '') ?? '9';
-  const pb = b.priority?.replace('P', '') ?? '9';
-  if (pa !== pb) return Number(pa) - Number(pb);
-  if (!a.due) return 1;
-  if (!b.due) return -1;
-  return a.due < b.due ? -1 : 1;
+// Todo order: due ascending; same due → priority (P0 first); items without
+// a due sink below dated ones and sort among themselves by priority.
+// Equal keys return 0 so the sort stays consistent.
+function dueMs(d: string | null | undefined): number | null {
+  if (!d) return null;
+  const t = Date.parse(d);
+  return Number.isFinite(t) ? t : null;
+}
+
+function byDueThenPriority(a: TodoItem, b: TodoItem): number {
+  const da = dueMs(a.due);
+  const db = dueMs(b.due);
+  if (da !== null && db !== null && da !== db) return da - db;
+  if (da === null && db !== null) return 1;
+  if (da !== null && db === null) return -1;
+  return priorityRank(a.priority) - priorityRank(b.priority);
 }
 
 export function toTodo(
@@ -154,7 +163,7 @@ export function toTodo(
       }
       return it;
     })
-    .sort(byPriorityThenDue);
+    .sort(byDueThenPriority);
 
   const mergedDone: TodoItem[] = records
     .filter(({ row }) => first(row[3]) === 'Done' && first(row[4]) === 'Task')
@@ -182,7 +191,7 @@ export function toTodo(
     .filter((it) => it.done && isTodayDate(it.completed_at, now))
     .slice(-DONE_LIMIT);
   items.push(...mergedDone.filter((it) => !it.done));
-  items.sort(byPriorityThenDue);
+  items.sort(byDueThenPriority);
 
   const pending_writes = localWrites.filter((w) => w?.record_id && failed.has(w.record_id));
 
@@ -213,7 +222,7 @@ export function toSchedule(records: FeishuRecord[], now: Date = new Date()) {
     }))
     .sort((a, b) => {
       // Same start → higher priority (smaller P number) first; same semantics
-      // as byPriorityThenDue. Equal keys return 0 to keep the sort consistent.
+      // as byDueThenPriority. Equal keys return 0 to keep the sort consistent.
       if (a.start !== b.start) return a.start < b.start ? -1 : 1;
       return priorityRank(a.priority) - priorityRank(b.priority);
     });

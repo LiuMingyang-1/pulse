@@ -43,7 +43,7 @@ const T = (id: string, status: string, extra: Record<string, unknown> = {}) =>
   rec(id, { Task: id, Status: status, Type: 'Task', ...extra });
 
 describe('toTodo', () => {
-  it('sorts by priority then due, defaults P2', () => {
+  it('sorts by due then priority, undated last, defaults P2', () => {
     const recs: FeishuRecord[] = [
       T('a', 'Inbox', { Priority: 'P2', Due: ms('2026-10-15T00:00:00Z') }),
       T('b', 'Doing', { Priority: 'P0' }),
@@ -52,11 +52,26 @@ describe('toTodo', () => {
       rec('r', { Task: 'rem', Status: 'Inbox', Type: 'Reminder' }),
     ];
     const t = toTodo(recs, null, new Set(), new Set(), NOW.toISOString());
-    expect(t.items.map((i) => i.id)).toEqual(['b', 'c', 'a', 'd']);
+    expect(t.items.map((i) => i.id)).toEqual(['c', 'a', 'b', 'd']);
     expect(t.pending_count).toBe(4);
     expect(t.items[3].priority).toBe('P2');
     expect(t.done_items).toBeUndefined();
     expect(t.pending_writes).toBeUndefined();
+  });
+
+  it('same due → priority (P0 first); equal keys keep input order', () => {
+    const due = ms('2026-10-14T10:00:00Z');
+    const recs: FeishuRecord[] = [
+      T('p2', 'Inbox', { Priority: 'P2', Due: due }),
+      T('p0', 'Inbox', { Priority: 'P0', Due: due }),
+      T('p1a', 'Inbox', { Priority: 'P1', Due: due }),
+      T('p1b', 'Inbox', { Priority: 'P1', Due: due }),
+      T('early', 'Inbox', { Priority: 'P3', Due: ms('2026-10-14T09:00:00Z') }),
+      T('nd3', 'Inbox', { Priority: 'P3' }),
+      T('nd0', 'Inbox', { Priority: 'P0' }),
+    ];
+    const t = toTodo(recs, null, new Set(), new Set(), NOW.toISOString());
+    expect(t.items.map((i) => i.id)).toEqual(['early', 'p0', 'p1a', 'p1b', 'p2', 'nd0', 'nd3']);
   });
 
   it('keeps local done while queued; drops acked writes; keeps failed', () => {
