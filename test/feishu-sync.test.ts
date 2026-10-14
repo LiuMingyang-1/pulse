@@ -30,7 +30,7 @@ function fakeDB(initial: Record<string, { data: string; updated_at: string }>, o
 
 const env = (DB: any) => ({ DB, FEISHU_APP_ID: 'id', FEISHU_APP_SECRET: 's', FEISHU_BASE_TOKEN: 'b', FEISHU_TABLE_ID: 't' });
 
-function mockFetch(batchCode = 0) {
+function mockFetch(batchCode = 0, opts: { staleReadBack?: boolean } = {}) {
   const calls: { url: string; body: any }[] = [];
   vi.stubGlobal('fetch', vi.fn(async (url: string, init: any) => {
     const body = init?.body ? JSON.parse(init.body) : null;
@@ -44,6 +44,11 @@ function mockFetch(batchCode = 0) {
         : { items: [{ record_id: 'r1', fields: { Task: [{ text: 'one' }], Status: 'Doing', Type: 'Task' } }], has_more: true, page_token: 'p2' } });
     }
     if (url.includes('batch_update')) return j({ code: batchCode, msg: batchCode ? 'nope' : 'ok' });
+    // Single-record read-back: pretend the write landed unless staleReadBack.
+    const get = url.match(/records\/([\w-]+)\?field_names=Status/);
+    if (get) {
+      return j({ code: 0, data: { record: { record_id: get[1], fields: { Status: opts.staleReadBack ? 'Doing' : 'Done' } } } });
+    }
     return new Response('?', { status: 404 });
   }));
   return calls;
@@ -76,6 +81,18 @@ describe('runFeishuSync', () => {
     const todo = JSON.parse(db.rows.todo.data);
     expect(todo.pending_writes).toHaveLength(1);
     expect(todo.items.find((i: any) => i.id === 'r1').sync_failed).toBe(true);
+  });
+
+  it('stale read-back requeues the write and keeps local done', async () => {
+    // batch_update succeeded but the narrow read-back still shows 'Doing' —
+    // the write isn't visible yet, so the todo must not snap back to undone.
+    mockFetch(0, { staleReadBack: true });
+    const db = fakeDB({ todo: { data: JSON.stringify({ items: [{ id: 'r1', title: 'one', due: null, priority: 'P2', done: true, pending: true, prev_status: 'Doing' }], pending_writes: [{ record_id: 'r1', status: 'Done' }] }), updated_at: 'T0' } });
+    const r = await runFeishuSync(env(db) as any);
+    expect(r.writes).toEqual({ acked: 0, failed: 1 });
+    const todo = JSON.parse(db.rows.todo.data);
+    expect(todo.pending_writes).toEqual([{ record_id: 'r1', status: 'Done', requested_at: expect.any(String) }]);
+    expect(todo.items.find((i: any) => i.id === 'r1')).toMatchObject({ done: true, sync_failed: true });
   });
 
   it('skips todo write if row changed concurrently', async () => {

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   adaptRecord, adaptValue, msToShanghaiIso, isTodayDate, toTodo, toReminder, toSchedule,
-  buildBatchUpdate, type FeishuRecord,
+  buildBatchUpdate, requeueWrites, type FeishuRecord,
 } from '../src/feishu-transform';
 
 const NOW = new Date('2026-10-13T04:00:00.000Z'); // 12:00 Shanghai
@@ -186,6 +186,48 @@ describe('buildBatchUpdate', () => {
     ])).toEqual([
       { record_id: 'a', fields: { Status: 'Doing' } },
       { record_id: 'c', fields: { Status: 'Done' } },
+    ]);
+  });
+});
+
+describe('requeueWrites', () => {
+  it('rebuilds writes from item state, preserving original requested_at', () => {
+    const local = {
+      items: [
+        { id: 'a', title: 'a', due: null, priority: 'P2', done: true, pending: true, prev_status: 'Doing' },
+        { id: 'b', title: 'b', due: null, priority: 'P2', done: false, pending: true, prev_status: 'Doing' },
+      ],
+      done_items: [
+        { id: 'c', title: 'c', due: null, priority: 'P2', done: true, prev_status: 'Inbox' },
+      ],
+      pending_writes: [
+        { record_id: 'a', status: 'Done', requested_at: '2026-10-15T01:00:00.000Z' },
+        { record_id: 'b', status: 'Doing', requested_at: '2026-10-15T02:00:00.000Z' },
+      ],
+    };
+    const out = requeueWrites(local, new Set(['a', 'b', 'c']));
+    expect(out).toEqual([
+      { record_id: 'a', status: 'Done', requested_at: '2026-10-15T01:00:00.000Z' },
+      { record_id: 'b', status: 'Doing', requested_at: '2026-10-15T02:00:00.000Z' },
+      { record_id: 'c', status: 'Done', requested_at: expect.any(String) },
+    ]);
+  });
+
+  it('requeued unconfirmed ids keep local done flags through toTodo', () => {
+    // Wide read still shows 'Doing' right after the write landed — without the
+    // requeue the item would flicker back to undone (the reported bug).
+    const recs = [T('a', 'Doing')];
+    const local = {
+      items: [{ id: 'a', title: 'a', due: null, priority: 'P2', done: true, pending: true, prev_status: 'Doing' }],
+      pending_writes: requeueWrites(
+        { items: [{ id: 'a', title: 'a', due: null, priority: 'P2', done: true, prev_status: 'Doing' }] },
+        new Set(['a']),
+      ),
+    };
+    const t = toTodo(recs, local, new Set(), new Set(['a']), NOW.toISOString());
+    expect(t.items[0]).toMatchObject({ id: 'a', done: true, pending: true, sync_failed: true });
+    expect(t.pending_writes).toEqual([
+      { record_id: 'a', status: 'Done', requested_at: expect.any(String) },
     ]);
   });
 });

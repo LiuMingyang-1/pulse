@@ -1,7 +1,8 @@
 // Feishu bitable → D1 sync, run from the Worker's own cron (replaces the
 // box-hosted scripts/sync-feishu.mjs loop). Never logs tokens or secrets.
 import {
-  FIELD_NAMES, adaptRecord, buildBatchUpdate, toReminder, toSchedule, toTodo,
+  FIELD_NAMES, adaptRecord, buildBatchUpdate, requeueWrites,
+  toReminder, toSchedule, toTodo,
   type FeishuRecord, type PendingWrite, type TodoData,
 } from './feishu-transform';
 
@@ -73,6 +74,45 @@ async function fetchRecords(env: FeishuEnv, token: string): Promise<FeishuRecord
   throw new FeishuError('records/search: too many pages');
 }
 
+// Read-back of just-written records via single-record GET — the wide
+// records/search list is eventually consistent and can echo the pre-write
+// Status for minutes, which would snap a freshly clicked todo back to undone
+// (see feishu-transform's requeueWrites). Single-record GET goes to the
+// primary store, so a mismatch means the write genuinely hasn't landed.
+// Never throws like the drain. Sequential one-by-one: queues are tiny (a tap
+// is one record), and a Promise.all burst just to read 1–3 rows isn't worth it.
+async function confirmWrites(
+  env: FeishuEnv, token: string, writes: PendingWrite[], acked: Set<string>, failed: Set<string>,
+) {
+  if (!acked.size) return;
+  const want = new Map<string, string>();
+  for (const w of writes) {
+    if (w?.record_id && typeof w.status === 'string' && acked.has(w.record_id)) {
+      want.set(w.record_id, w.status);
+    }
+  }
+  for (const [rid, expected] of want) {
+    try {
+      const res = await fetch(
+        `${tablePath(env)}/records/${encodeURIComponent(rid)}?field_names=${encodeURIComponent('Status')}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      const body = await feishuJson(res, `record get ${rid}`);
+      const v = body?.data?.record?.fields?.Status;
+      const status = Array.isArray(v) ? v[0] : v;
+      if (status !== expected) {
+        acked.delete(rid);
+        failed.add(rid);
+      }
+    } catch (err) {
+      // Can't confirm — pessimistically requeue; next round re-verifies.
+      console.error(`[feishu] read-back failed for ${rid}:`, (err as Error).message);
+      acked.delete(rid);
+      failed.add(rid);
+    }
+  }
+}
+
 // Never throws — write-back failure must not block the read path.
 async function drainPendingWrites(env: FeishuEnv, token: string, writes: PendingWrite[]) {
   const acked = new Set<string>();
@@ -123,11 +163,23 @@ export async function runFeishuSync(env: FeishuEnv): Promise<FeishuSyncResult> {
     }
 
     const token = await getTenantToken(env);
-    const records = await fetchRecords(env, token);
     const local = todoRead.data;
     // Don't drain if the todo read failed: we couldn't persist the outcome.
     const writes = todoRead.ok && Array.isArray(local?.pending_writes) ? local!.pending_writes! : [];
     const { acked, failed } = await drainPendingWrites(env, token, writes);
+    // Read back just-written records before the wide read: if it still shows
+    // the old Status the write isn't real yet — requeue so toTodo keeps the
+    // user's click and retries next round instead of snapping back to undone.
+    // Skipped when nothing was queued (common case on a plain cron tick).
+    await confirmWrites(env, token, writes, acked, failed);
+
+    const records = await fetchRecords(env, token);
+    if (failed.size && local) {
+      // Replace the queue wholesale: requeueWrites rebuilds one entry per
+      // unverified record from the item's current state, so assigning it back
+      // keeps queuedIds live without double-counting the originals.
+      local.pending_writes = requeueWrites(local, failed);
+    }
 
     const nowIso = new Date().toISOString();
     const todo = toTodo(records, local, acked, failed, nowIso);

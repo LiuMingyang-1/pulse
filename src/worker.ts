@@ -241,6 +241,14 @@ app.post('/api/todo/toggle', requireAuth, async (c) => {
     .bind(JSON.stringify(data), now, 'todo')
     .run();
 
+  // Push the queued write to Feishu right away instead of waiting up to one
+  // cron interval — the response can't await it or the click feels frozen.
+  c.executionCtx.waitUntil(
+    runFeishuSync(c.env).catch((err) => {
+      console.error('[feishu] toggle-triggered sync failed:', err?.message ?? err);
+    }),
+  );
+
   return c.json({
     id: 'todo',
     title: row.title,
