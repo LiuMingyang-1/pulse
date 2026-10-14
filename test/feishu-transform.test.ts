@@ -165,6 +165,19 @@ describe('toReminder / toSchedule', () => {
   });
 });
 
+describe('toSchedule mixed offsets', () => {
+  it('compares start by timestamp, ties by priority', () => {
+    const row = (t: string, p: string, start: string) =>
+      ({ record_id: t, row: [t, null, p, 'Doing', 'Task', start, '2026-10-13T23:00:00.000+08:00'] }) as unknown as FeishuRecord;
+    const recs = [
+      row('p2', 'P2', '2026-10-13T02:00:00.000Z'),
+      row('p0', 'P0', '2026-10-13T10:00:00.000+08:00'), // same instant, sorts later as a string
+      row('mid', 'P3', '2026-10-13T09:30:00.000+08:00'), // earlier instant, later string
+    ];
+    expect(toSchedule(recs, NOW).events.map((e) => e.title)).toEqual(['mid', 'p0', 'p2']);
+  });
+});
+
 describe('buildBatchUpdate', () => {
   it('uses string single-select, last write wins, skips invalid', () => {
     expect(buildBatchUpdate([

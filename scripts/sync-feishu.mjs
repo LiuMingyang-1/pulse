@@ -329,7 +329,7 @@ function toReminder(records) {
   return { items };
 }
 
-// schedule contract: { events: [{title, start, end}] } — every record decided
+// schedule contract: { events: [{title, start, end, priority}] } — every record decided
 // for today (Status=Doing) AND actually slotted (both Scheduled times present),
 // regardless of Type: talks/interviews often aren't Type=Task but still belong
 // on today's timeline. The Scheduled Start must also fall on today — a Doing
@@ -349,9 +349,12 @@ function toSchedule(records) {
       end: row[6],
       priority: first(row[2]) ?? 'P2',
     }))
-    // Same start → higher priority first (matches src/feishu-transform.ts).
+    // Start ascending by timestamp; same instant → higher priority first
+    // (matches src/feishu-transform.ts).
     .sort((a, b) => {
-      if (a.start !== b.start) return a.start < b.start ? -1 : 1;
+      const sa = Date.parse(a.start);
+      const sb = Date.parse(b.start);
+      if (sa !== sb) return sa - sb;
       return priorityRank(a.priority) - priorityRank(b.priority);
     });
   return { events };

@@ -8,16 +8,22 @@ import { join, delimiter } from 'node:path';
 
 const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date());
 const at = (hm: string) => `${today}T${hm}:00.000+08:00`;
+// Same wall-clock time as at(hm), written in UTC (Shanghai has no DST).
+const atZ = (hm: string) => new Date(at(hm)).toISOString();
 
 // [Task, Due, Priority, Status, Type, Scheduled Start, Scheduled End]
 const rows: Array<[string, unknown[]]> = [
-  ['p2', ['p2', '2026-10-20T10:00:00.000+08:00', ['P2'], ['Inbox'], ['Task'], null, null]],
-  ['p0', ['p0', '2026-10-20T02:00:00.000Z', ['P0'], ['Inbox'], ['Task'], null, null]], // same instant as p2
+  // p2/p0 are the same instant written two ways; p0's string sorts AFTER p2's,
+  // so only a timestamp compare + priority tie-break yields p0 first.
+  ['p2', ['p2', '2026-10-20T02:00:00.000Z', ['P2'], ['Inbox'], ['Task'], null, null]],
+  ['p0', ['p0', '2026-10-20T10:00:00.000+08:00', ['P0'], ['Inbox'], ['Task'], null, null]],
+  // 01:30Z: earlier instant than p0/p2 but its string sorts after 'T02…Z'.
+  ['mid', ['mid', '2026-10-20T09:30:00.000+08:00', ['P3'], ['Inbox'], ['Task'], null, null]],
   ['early', ['early', '2026-10-19T09:00:00.000+08:00', ['P3'], ['Inbox'], ['Task'], null, null]],
   ['nd3', ['nd3', null, ['P3'], ['Inbox'], ['Task'], null, null]],
   ['nd0', ['nd0', null, ['P0'], ['Inbox'], ['Task'], null, null]],
   ['s2', ['s2', null, ['P2'], ['Doing'], ['Reminder'], at('15:00'), at('16:00')]],
-  ['s0', ['s0', null, ['P0'], ['Doing'], ['Reminder'], at('15:00'), at('17:00')]],
+  ['s0', ['s0', null, ['P0'], ['Doing'], ['Reminder'], atZ('15:00'), at('17:00')]], // same instant as s2, UTC form
   ['s9', ['s9', null, ['P1'], ['Doing'], ['Reminder'], at('09:00'), at('10:00')]],
 ];
 
@@ -47,13 +53,14 @@ function runDry() {
       PULSE_TOKEN: '', AGENT_TOKEN: '', // no D1 read in the test
     },
   });
-  return JSON.parse(out.slice(out.indexOf('{\n')));
+  // The dry-run JSON is the only top-level object starting on its own line.
+  return JSON.parse(out.slice(out.indexOf('\n{\n') + 1));
 }
 
 describe('scripts/sync-feishu.mjs (dry-run)', () => {
   it('todo: due ascending by timestamp, same due → P0 first, undated last by priority', () => {
     const { todo } = runDry();
-    expect(todo.items.map((i: any) => i.id)).toEqual(['early', 'p0', 'p2', 'nd0', 'nd3']);
+    expect(todo.items.map((i: any) => i.id)).toEqual(['early', 'mid', 'p0', 'p2', 'nd0', 'nd3']);
   });
 
   it('schedule: start ascending, same start → priority', () => {

@@ -221,9 +221,12 @@ export function toSchedule(records: FeishuRecord[], now: Date = new Date()) {
       priority: first(row[2]) ?? 'P2',
     }))
     .sort((a, b) => {
-      // Same start → higher priority (smaller P number) first; same semantics
-      // as byDueThenPriority. Equal keys return 0 to keep the sort consistent.
-      if (a.start !== b.start) return a.start < b.start ? -1 : 1;
+      // Start ascending by timestamp (isTodayDate already guarantees it
+      // parses); same instant → higher priority (smaller P number) first,
+      // same semantics as byDueThenPriority. Equal keys return 0.
+      const sa = Date.parse(a.start);
+      const sb = Date.parse(b.start);
+      if (sa !== sb) return sa - sb;
       return priorityRank(a.priority) - priorityRank(b.priority);
     });
   return { events };
