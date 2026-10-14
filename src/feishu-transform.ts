@@ -136,7 +136,6 @@ export function toTodo(
   failed: Set<string>,
   nowIso: string,
 ): TodoData {
-  void acked; // kept for parity with the script's signature
   const now = new Date(nowIso);
   const localById = new Map<string, TodoItem>();
   for (const list of [local?.items, local?.done_items]) {
@@ -240,4 +239,39 @@ export function buildBatchUpdate(writes: PendingWrite[]) {
     if (w?.record_id && typeof w.status === 'string') byId.set(w.record_id, w.status);
   }
   return [...byId].map(([record_id, status]) => ({ record_id, fields: { Status: status } }));
+}
+
+// The wide records/search read is eventually consistent — right after a
+// batch_update it can return the pre-write Status, which would flip a freshly
+// clicked todo back to undone until the next round. Requeue those ids into
+// pending_writes so the local done flags survive and the write retries.
+export function requeueWrites(
+  local: Partial<TodoData> | null | undefined,
+  unverified: Set<string>,
+): PendingWrite[] {
+  const prev = new Map<string, PendingWrite>();
+  for (const w of Array.isArray(local?.pending_writes) ? local!.pending_writes! : []) {
+    if (w?.record_id && !prev.has(w.record_id)) prev.set(w.record_id, w);
+  }
+  const out: PendingWrite[] = [];
+  for (const list of [local?.items, local?.done_items]) {
+    if (!Array.isArray(list)) continue;
+    for (const it of list) {
+      if (!it?.id || !unverified.has(it.id)) continue;
+      const w = prev.get(it.id);
+      out.push({
+        ...(w ?? {}),
+        record_id: it.id,
+        status: it.done ? 'Done' : (it.prev_status ?? 'Inbox'),
+        requested_at: w?.requested_at ?? new Date().toISOString(),
+      });
+      prev.delete(it.id);
+    }
+  }
+  // unverified ids that vanished from both lists — keep the queued write.
+  for (const id of unverified) {
+    const w = prev.get(id);
+    if (w) out.push(w);
+  }
+  return out;
 }
