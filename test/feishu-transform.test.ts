@@ -51,7 +51,7 @@ describe('toTodo', () => {
       T('d', 'Inbox'),
       rec('r', { Task: 'rem', Status: 'Inbox', Type: 'Reminder' }),
     ];
-    const t = toTodo(recs, null, new Set(), new Set(), NOW.toISOString());
+    const t = toTodo(recs, null, new Set(), new Set(), new Set(), NOW.toISOString());
     expect(t.items.map((i) => i.id)).toEqual(['c', 'a', 'b', 'd']);
     expect(t.pending_count).toBe(4);
     expect(t.items[3].priority).toBe('P2');
@@ -70,7 +70,7 @@ describe('toTodo', () => {
       T('nd3', 'Inbox', { Priority: 'P3' }),
       T('nd0', 'Inbox', { Priority: 'P0' }),
     ];
-    const t = toTodo(recs, null, new Set(), new Set(), NOW.toISOString());
+    const t = toTodo(recs, null, new Set(), new Set(), new Set(), NOW.toISOString());
     expect(t.items.map((i) => i.id)).toEqual(['early', 'p0', 'p1a', 'p1b', 'p2', 'nd0', 'nd3']);
   });
 
@@ -84,7 +84,7 @@ describe('toTodo', () => {
       ],
       pending_writes: [{ record_id: 'a', status: 'Done' }, { record_id: 'b', status: 'Done' }],
     };
-    const t = toTodo(recs, local, new Set(['a']), new Set(['b']), NOW.toISOString());
+    const t = toTodo(recs, local, new Set(['a']), new Set(['b']), new Set(), NOW.toISOString());
     const by = Object.fromEntries(t.items.map((i) => [i.id, i]));
     expect(by.a).toMatchObject({ done: true, pending: true, prev_status: 'Doing' });
     expect(by.a.sync_failed).toBeUndefined();
@@ -92,6 +92,52 @@ describe('toTodo', () => {
     expect(by.c.done).toBeUndefined(); // superseded: not queued → Feishu truth
     expect(t.pending_count).toBe(1);
     expect(t.pending_writes).toEqual([{ record_id: 'b', status: 'Done' }]);
+  });
+
+  it('unsettled write keeps done+pending without sync_failed and stays queued', () => {
+    // The write landed but records/search still shows the old Status — the
+    // item must not snap back to undone and the write stays queued until the
+    // wide index catches up.
+    const recs = [T('a', 'Doing')];
+    const local = {
+      items: [{ id: 'a', title: 'a', due: null, priority: 'P2', done: true, pending: true, prev_status: 'Doing' }],
+      pending_writes: [{ record_id: 'a', status: 'Done' }],
+    };
+    const t = toTodo(recs, local, new Set(), new Set(), new Set(['a']), NOW.toISOString());
+    expect(t.items[0]).toMatchObject({ id: 'a', done: true, pending: true, prev_status: 'Doing' });
+    expect(t.items[0].sync_failed).toBeUndefined();
+    expect(t.pending_writes).toEqual([{ record_id: 'a', status: 'Done' }]);
+  });
+
+  it('unsettled undo keeps a Done row lifted in items', () => {
+    const recs = [T('u', 'Done')];
+    const local = {
+      items: [{ id: 'u', title: 'u', due: null, priority: 'P2', done: false, pending: true, prev_status: 'Doing' }],
+      pending_writes: [{ record_id: 'u', status: 'Doing' }],
+    };
+    const t = toTodo(recs, local, new Set(), new Set(), new Set(['u']), NOW.toISOString());
+    expect(t.items).toHaveLength(1);
+    expect(t.items[0]).toMatchObject({ id: 'u', done: false, pending: true });
+    expect(t.items[0].sync_failed).toBeUndefined();
+    expect(t.pending_writes).toEqual([{ record_id: 'u', status: 'Doing' }]);
+  });
+
+  it('a locally-done item held through index lag keeps completed_at into done_items', () => {
+    // Devin Review regression: the kept-local projection dropped completed_at,
+    // so when the index finally showed Done the today-only done_items filter
+    // hid the item. The stamp must ride along while the write is held.
+    const completedAt = '2026-10-13T02:00:00.000Z';
+    const local = {
+      items: [{ id: 'a', title: 'a', due: null, priority: 'P2', done: true, pending: true, prev_status: 'Doing', completed_at: completedAt }],
+      pending_writes: [{ record_id: 'a', status: 'Done', landed: true }],
+    };
+    const t1 = toTodo([T('a', 'Doing')], local, new Set(), new Set(), new Set(['a']), NOW.toISOString());
+    expect(t1.items[0]).toMatchObject({ done: true, pending: true, completed_at: completedAt });
+    // Index catches up → the Done projection carries prev.completed_at → the
+    // item lands in done_items with the original stamp.
+    const t2 = toTodo([T('a', 'Done')], { items: t1.items, pending_writes: t1.pending_writes }, new Set(['a']), new Set(), new Set(), NOW.toISOString());
+    expect(t2.done_items).toHaveLength(1);
+    expect(t2.done_items![0]).toMatchObject({ id: 'a', completed_at: completedAt });
   });
 
   it('stamps completed_at only for newly completed; done_items today-only', () => {
@@ -103,7 +149,7 @@ describe('toTodo', () => {
         { id: 'yday', title: 'y', due: null, priority: 'P2', done: true, completed_at: '2026-10-12T10:00:00.000Z' },
       ],
     };
-    const t = toTodo(recs, local, new Set(), new Set(), NOW.toISOString());
+    const t = toTodo(recs, local, new Set(), new Set(), new Set(), NOW.toISOString());
     expect(t.done_items!.map((i) => i.id)).toEqual(['new', 'kept']);
     expect(t.done_items![0].completed_at).toBe(NOW.toISOString());
     expect(t.items).toEqual([]);
@@ -115,7 +161,7 @@ describe('toTodo', () => {
       items: [{ id: 'u', title: 'u', due: null, priority: 'P2', done: false, pending: true, prev_status: 'Doing' }],
       pending_writes: [{ record_id: 'u', status: 'Doing' }],
     };
-    const t = toTodo(recs, local, new Set(['u']), new Set(), NOW.toISOString());
+    const t = toTodo(recs, local, new Set(['u']), new Set(), new Set(), NOW.toISOString());
     expect(t.items).toHaveLength(1);
     expect(t.items[0]).toMatchObject({ id: 'u', done: false, pending: true, prev_status: 'Doing' });
     expect(t.pending_count).toBe(1);
@@ -124,7 +170,7 @@ describe('toTodo', () => {
   it('caps done_items at 20', () => {
     const recs = Array.from({ length: 25 }, (_, i) => T(`d${i}`, 'Done'));
     const local = { items: recs.map((r) => ({ id: r.record_id, title: 'x', due: null, priority: 'P2' })) };
-    expect(toTodo(recs, local, new Set(), new Set(), NOW.toISOString()).done_items).toHaveLength(20);
+    expect(toTodo(recs, local, new Set(), new Set(), new Set(), NOW.toISOString()).done_items).toHaveLength(20);
   });
 });
 
@@ -224,7 +270,7 @@ describe('requeueWrites', () => {
         new Set(['a']),
       ),
     };
-    const t = toTodo(recs, local, new Set(), new Set(['a']), NOW.toISOString());
+    const t = toTodo(recs, local, new Set(), new Set(['a']), new Set(), NOW.toISOString());
     expect(t.items[0]).toMatchObject({ id: 'a', done: true, pending: true, sync_failed: true });
     expect(t.pending_writes).toEqual([
       { record_id: 'a', status: 'Done', requested_at: expect.any(String) },

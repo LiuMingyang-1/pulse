@@ -27,7 +27,16 @@ export interface TodoItem {
   sync_failed?: boolean;
   completed_at?: string;
 }
-export interface PendingWrite { record_id?: string; status?: string; [k: string]: unknown }
+export interface PendingWrite {
+  record_id?: string;
+  status?: string;
+  // Set once a single-record read confirms the primary row holds `status`.
+  // Landed writes are never re-sent — they stay queued only until the
+  // lagging records/search index shows the same value (or the primary
+  // diverges, meaning someone else edited the row).
+  landed?: boolean;
+  [k: string]: unknown;
+}
 export interface TodoData {
   pending_count: number;
   items: TodoItem[];
@@ -134,6 +143,7 @@ export function toTodo(
   local: Partial<TodoData> | null | undefined,
   acked: Set<string>,
   failed: Set<string>,
+  unsettled: Set<string>,
   nowIso: string,
 ): TodoData {
   const now = new Date(nowIso);
@@ -154,9 +164,17 @@ export function toTodo(
         priority: first(row[2]) ?? 'P2',
         status: first(row[3]),
       };
-      if (prev?.done && (queuedIds.has(id) || failed.has(id))) {
+      // Locally-marked done while Feishu still shows it unfinished: keep the
+      // sunken state as long as the write is unsettled (in flight, held for
+      // the lagging index, or just failed). Only failed writes get the red
+      // ring — waiting for the index is a normal multi-minute window.
+      // completed_at must ride along: without it the item carries no
+      // completion stamp into the next round's Done projection, and the
+      // today-only done_items filter drops it once the index catches up.
+      if (prev?.done && (queuedIds.has(id) || failed.has(id) || unsettled.has(id))) {
         it.done = true;
         if (prev.prev_status) it.prev_status = prev.prev_status;
+        if (prev.completed_at) it.completed_at = prev.completed_at;
         it.pending = true;
         if (failed.has(id)) it.sync_failed = true;
       }
@@ -179,7 +197,7 @@ export function toTodo(
       if (prev?.completed_at) it.completed_at = prev.completed_at;
       else if (prev && prev.done !== true) it.completed_at = nowIso;
       if (prev?.prev_status) it.prev_status = prev.prev_status;
-      if (prev && prev.done === false && (queuedIds.has(id) || failed.has(id))) {
+      if (prev && prev.done === false && (queuedIds.has(id) || failed.has(id) || unsettled.has(id))) {
         it.done = false;
         it.pending = true;
         if (failed.has(id)) it.sync_failed = true;
@@ -192,7 +210,12 @@ export function toTodo(
   items.push(...mergedDone.filter((it) => !it.done));
   items.sort(byDueThenPriority);
 
-  const pending_writes = localWrites.filter((w) => w?.record_id && failed.has(w.record_id));
+  // Writes stay queued while they're unsettled — still in flight, held for
+  // the lagging index, or failed. Verified writes and released ones (record
+  // gone / external edit) drop out.
+  const pending_writes = localWrites.filter(
+    (w) => w?.record_id && (failed.has(w.record_id) || unsettled.has(w.record_id)),
+  );
 
   return {
     pending_count: items.filter((it) => !it.done).length,
@@ -243,11 +266,11 @@ export function buildBatchUpdate(writes: PendingWrite[]) {
 
 // The wide records/search read is eventually consistent — right after a
 // batch_update it can return the pre-write Status, which would flip a freshly
-// clicked todo back to undone until the next round. Requeue those ids into
-// pending_writes so the local done flags survive and the write retries.
+// clicked todo back to undone until the next round. Requeue the still-
+// unsettled ids into pending_writes so the local done flags survive.
 export function requeueWrites(
   local: Partial<TodoData> | null | undefined,
-  unverified: Set<string>,
+  unsettled: Set<string>,
 ): PendingWrite[] {
   const prev = new Map<string, PendingWrite>();
   for (const w of Array.isArray(local?.pending_writes) ? local!.pending_writes! : []) {
@@ -257,7 +280,7 @@ export function requeueWrites(
   for (const list of [local?.items, local?.done_items]) {
     if (!Array.isArray(list)) continue;
     for (const it of list) {
-      if (!it?.id || !unverified.has(it.id)) continue;
+      if (!it?.id || !unsettled.has(it.id)) continue;
       const w = prev.get(it.id);
       out.push({
         ...(w ?? {}),
@@ -268,8 +291,8 @@ export function requeueWrites(
       prev.delete(it.id);
     }
   }
-  // unverified ids that vanished from both lists — keep the queued write.
-  for (const id of unverified) {
+  // unsettled ids that vanished from both lists — keep the queued write.
+  for (const id of unsettled) {
     const w = prev.get(id);
     if (w) out.push(w);
   }
