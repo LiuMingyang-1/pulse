@@ -191,13 +191,28 @@ function pending(records, type) {
   return records.filter(({ row }) => first(row[3]) !== 'Done' && first(row[4]) === type);
 }
 
-function byPriorityThenDue(a, b) {
-  const pa = a.priority?.replace('P', '') ?? '9';
-  const pb = b.priority?.replace('P', '') ?? '9';
-  if (pa !== pb) return Number(pa) - Number(pb);
-  if (!a.due) return 1;
-  if (!b.due) return -1;
-  return a.due < b.due ? -1 : 1;
+// 'P0' → 0 … 'P3' → 3; missing/unparsable sinks to 9.
+function priorityRank(p) {
+  const n = Number(p?.replace('P', '') ?? '9');
+  return Number.isFinite(n) ? n : 9;
+}
+
+const dueMs = (d) => {
+  if (!d) return null;
+  const t = Date.parse(d);
+  return Number.isFinite(t) ? t : null;
+};
+
+// Same rule as src/feishu-transform.ts byDueThenPriority: due ascending (by
+// timestamp); same due → P0 first; undated rows last, sorted by priority.
+// Equal keys return 0 so the sort stays consistent.
+function byDueThenPriority(a, b) {
+  const da = dueMs(a.due);
+  const db = dueMs(b.due);
+  if (da !== null && db !== null && da !== db) return da - db;
+  if (da === null && db !== null) return 1;
+  if (da !== null && db === null) return -1;
+  return priorityRank(a.priority) - priorityRank(b.priority);
 }
 
 // todo contract: { pending_count, items: [{id, title, due, priority, status,
@@ -242,7 +257,7 @@ function toTodo(records, local, acked, failed, now) {
       }
       return it;
     })
-    .sort(byPriorityThenDue);
+    .sort(byDueThenPriority);
 
   // Feishu-side completions. The bitable has no reliable completion timestamp
   // (last_modified_time isn't a field lark-cli can select here; Created is a
@@ -288,7 +303,7 @@ function toTodo(records, local, acked, failed, now) {
     .filter((it) => it.done && isTodayDate(it.completed_at))
     .slice(-DONE_LIMIT);
   items.push(...mergedDone.filter((it) => !it.done));
-  items.sort(byPriorityThenDue);
+  items.sort(byDueThenPriority);
 
   // Keep only writes this round failed — acked ones are done, and a row that
   // no longer exists in Feishu simply drops out with its queue entry.
@@ -328,8 +343,17 @@ function toSchedule(records) {
       ({ row }) =>
         first(row[3]) === 'Doing' && row[5] && row[6] && isTodayDate(row[5]),
     )
-    .map(({ row }) => ({ title: row[0] ?? '(untitled)', start: row[5], end: row[6] }))
-    .sort((a, b) => (a.start < b.start ? -1 : 1));
+    .map(({ row }) => ({
+      title: row[0] ?? '(untitled)',
+      start: row[5],
+      end: row[6],
+      priority: first(row[2]) ?? 'P2',
+    }))
+    // Same start → higher priority first (matches src/feishu-transform.ts).
+    .sort((a, b) => {
+      if (a.start !== b.start) return a.start < b.start ? -1 : 1;
+      return priorityRank(a.priority) - priorityRank(b.priority);
+    });
   return { events };
 }
 
