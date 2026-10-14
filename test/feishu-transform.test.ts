@@ -94,10 +94,10 @@ describe('toTodo', () => {
     expect(t.pending_writes).toEqual([{ record_id: 'b', status: 'Done' }]);
   });
 
-  it('unverified write keeps done+pending without sync_failed and stays queued', () => {
-    // batch_update acked the write but records/search still shows the old
-    // Status — the item must not snap back to undone and the write must be
-    // re-emitted so a later round can re-verify.
+  it('unsettled write keeps done+pending without sync_failed and stays queued', () => {
+    // The write landed but records/search still shows the old Status — the
+    // item must not snap back to undone and the write stays queued until the
+    // wide index catches up.
     const recs = [T('a', 'Doing')];
     const local = {
       items: [{ id: 'a', title: 'a', due: null, priority: 'P2', done: true, pending: true, prev_status: 'Doing' }],
@@ -109,7 +109,7 @@ describe('toTodo', () => {
     expect(t.pending_writes).toEqual([{ record_id: 'a', status: 'Done' }]);
   });
 
-  it('unverified undo keeps a Done row lifted in items', () => {
+  it('unsettled undo keeps a Done row lifted in items', () => {
     const recs = [T('u', 'Done')];
     const local = {
       items: [{ id: 'u', title: 'u', due: null, priority: 'P2', done: false, pending: true, prev_status: 'Doing' }],
@@ -120,6 +120,24 @@ describe('toTodo', () => {
     expect(t.items[0]).toMatchObject({ id: 'u', done: false, pending: true });
     expect(t.items[0].sync_failed).toBeUndefined();
     expect(t.pending_writes).toEqual([{ record_id: 'u', status: 'Doing' }]);
+  });
+
+  it('a locally-done item held through index lag keeps completed_at into done_items', () => {
+    // Devin Review regression: the kept-local projection dropped completed_at,
+    // so when the index finally showed Done the today-only done_items filter
+    // hid the item. The stamp must ride along while the write is held.
+    const completedAt = '2026-10-13T02:00:00.000Z';
+    const local = {
+      items: [{ id: 'a', title: 'a', due: null, priority: 'P2', done: true, pending: true, prev_status: 'Doing', completed_at: completedAt }],
+      pending_writes: [{ record_id: 'a', status: 'Done', landed: true }],
+    };
+    const t1 = toTodo([T('a', 'Doing')], local, new Set(), new Set(), new Set(['a']), NOW.toISOString());
+    expect(t1.items[0]).toMatchObject({ done: true, pending: true, completed_at: completedAt });
+    // Index catches up → the Done projection carries prev.completed_at → the
+    // item lands in done_items with the original stamp.
+    const t2 = toTodo([T('a', 'Done')], { items: t1.items, pending_writes: t1.pending_writes }, new Set(['a']), new Set(), new Set(), NOW.toISOString());
+    expect(t2.done_items).toHaveLength(1);
+    expect(t2.done_items![0]).toMatchObject({ id: 'a', completed_at: completedAt });
   });
 
   it('stamps completed_at only for newly completed; done_items today-only', () => {
