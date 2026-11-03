@@ -4,7 +4,7 @@ import Layout from '../layouts/Layout.astro';
 
 <Layout>
   <div class="shell">
-    <!-- Hark-style floating top bar: round button · pill · avatar -->
+    <!-- Hark-style floating top bar: round button · pill · session -->
     <header class="topbar">
       <button id="refresh" class="glass round" aria-label="刷新">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></svg>
@@ -12,7 +12,11 @@ import Layout from '../layouts/Layout.astro';
       <nav class="glass pill">
         <span class="seg active">首页</span>
       </nav>
-      <div class="avatar" aria-hidden="true">P</div>
+      <div class="account">
+        <button type="button" id="login-btn" class="glass account-btn">登录</button>
+        <span id="account-state" class="account-state" hidden>已登录</span>
+        <button type="button" id="logout-btn" class="glass account-btn" hidden>退出</button>
+      </div>
     </header>
 
     <main>
@@ -23,6 +27,19 @@ import Layout from '../layouts/Layout.astro';
       <div id="cards" class="cards"></div>
     </main>
   </div>
+
+  <dialog id="login-dialog" class="login-dialog" aria-labelledby="login-title">
+    <form id="login-form" class="login-card" method="post" action="#">
+      <h2 id="login-title">登录</h2>
+      <p class="login-hint">输入 AGENT_TOKEN。登录后会在这台设备记住约 30 天，桌面快捷方式不用把口令写进网址。</p>
+      <input id="login-token" name="token" type="password" autocomplete="current-password" spellcheck="false" required aria-label="AGENT_TOKEN" />
+      <p id="login-error" class="login-error" role="alert" hidden></p>
+      <div class="login-actions">
+        <button type="button" id="login-cancel" class="login-secondary">取消</button>
+        <button type="submit" id="login-submit" class="login-primary">登录</button>
+      </div>
+    </form>
+  </dialog>
 
   <script>
     import { registry } from '../widgets/registry';
@@ -96,19 +113,157 @@ import Layout from '../layouts/Layout.astro';
       body.querySelector<HTMLButtonElement>('[data-pager="1"]')!.disabled = i === pages.length - 1;
     }
 
-    // ── todo toggle auth ─────────────────────────────────────────────────
-    // ?token=<AGENT_TOKEN> once → localStorage, then strip it from the URL so
-    // the bookmark/address bar doesn't carry the secret around.
-    const TOKEN_KEY = 'pulse_token';
-    const urlToken = new URLSearchParams(location.search).get('token');
-    if (urlToken) {
-      localStorage.setItem(TOKEN_KEY, urlToken);
-      history.replaceState(null, '', location.pathname);
+    // ── session ──────────────────────────────────────────────────────────
+    // HttpOnly cookie set by POST /api/login. The page only learns whether
+    // it is signed in via GET /api/session. A legacy localStorage token (or
+    // ?token= if the worker redirect didn't already consume it) is exchanged
+    // once, then dropped. Desktop shortcuts do not need the token in the URL.
+    const LEGACY_TOKEN_KEY = 'pulse_token';
+    let loggedIn = false;
+
+    function renderSession() {
+      document.getElementById('login-btn')!.hidden = loggedIn;
+      document.getElementById('account-state')!.hidden = !loggedIn;
+      document.getElementById('logout-btn')!.hidden = !loggedIn;
     }
-    const writeToken = () => localStorage.getItem(TOKEN_KEY);
+
+    function showLoginError(message: string) {
+      const el = document.getElementById('login-error')!;
+      el.textContent = message;
+      el.hidden = message.length === 0;
+    }
+
+    function legacyToken(): string | null {
+      try {
+        return localStorage.getItem(LEGACY_TOKEN_KEY);
+      } catch {
+        return null;
+      }
+    }
+
+    function clearLegacyToken() {
+      try {
+        localStorage.removeItem(LEGACY_TOKEN_KEY);
+      } catch {
+        /* private mode */
+      }
+    }
+
+    function stripTokenParam() {
+      const url = new URL(location.href);
+      if (!url.searchParams.has('token')) return;
+      url.searchParams.delete('token');
+      history.replaceState(null, '', url.pathname + url.search + url.hash);
+    }
+
+    function postLogin(token: string) {
+      return fetch('/api/login', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token }),
+      });
+    }
+
+    // Capture ?token= before stripping it. A network failure leaves the param
+    // in place so a reload can retry; a response (even 401/429) clears it.
+    async function adoptExistingToken() {
+      const urlToken = new URL(location.href).searchParams.get('token');
+      const legacy = legacyToken();
+      if (urlToken) {
+        try {
+          const res = await postLogin(urlToken);
+          if (res.ok || res.status === 401 || res.status === 429) stripTokenParam();
+          if (res.ok || (res.status === 401 && legacy === urlToken)) clearLegacyToken();
+          if (res.ok) return;
+          if (res.status !== 401) return;
+        } catch {
+          return;
+        }
+      }
+      if (legacy && legacy !== urlToken) {
+        try {
+          const res = await postLogin(legacy);
+          if (res.ok || res.status === 401) clearLegacyToken();
+        } catch {
+          /* keep the legacy token for the next load */
+        }
+      }
+    }
+
+    async function refreshSession() {
+      try {
+        const res = await fetch('/api/session', { credentials: 'same-origin', cache: 'no-store' });
+        const body = await res.json();
+        loggedIn = body?.authenticated === true;
+      } catch {
+        loggedIn = false;
+      }
+      renderSession();
+    }
+
+    async function bootstrapSession() {
+      await adoptExistingToken();
+      await refreshSession();
+    }
+
+    const sessionReady = bootstrapSession();
+
+    const loginDialog = document.getElementById('login-dialog') as HTMLDialogElement;
+    document.getElementById('login-btn')!.addEventListener('click', () => {
+      showLoginError('');
+      (document.getElementById('login-token') as HTMLInputElement).value = '';
+      loginDialog.showModal();
+    });
+    document.getElementById('login-cancel')!.addEventListener('click', () => loginDialog.close());
+    loginDialog.addEventListener('close', () => {
+      (document.getElementById('login-token') as HTMLInputElement).value = '';
+      showLoginError('');
+    });
+    document.getElementById('login-form')!.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const input = document.getElementById('login-token') as HTMLInputElement;
+      const submit = document.getElementById('login-submit') as HTMLButtonElement;
+      const token = input.value;
+      if (!token) return;
+      showLoginError('');
+      submit.disabled = true;
+      try {
+        const res = await postLogin(token);
+        if (res.ok) {
+          loggedIn = true;
+          renderSession();
+          loginDialog.close();
+          return;
+        }
+        if (res.status === 429) {
+          const retry = Number(res.headers.get('Retry-After'));
+          showLoginError(
+            Number.isFinite(retry) && retry > 0
+              ? `尝试太频繁，请 ${retry} 秒后再试`
+              : '尝试太频繁，请稍后再试',
+          );
+        } else {
+          showLoginError('口令不正确');
+        }
+      } catch {
+        showLoginError('网络异常，请重试');
+      } finally {
+        submit.disabled = false;
+      }
+    });
+    document.getElementById('logout-btn')!.addEventListener('click', async () => {
+      try {
+        await fetch('/api/logout', { method: 'POST', credentials: 'same-origin' });
+      } catch {
+        /* still drop the local signed-in state */
+      }
+      loggedIn = false;
+      renderSession();
+    });
 
     // Button-only Feishu sync. The 60s /api/widgets poll does not sync.
-    // Same pulse_token as todo check-off; debounce matches the server cooldown.
+    // Debounce matches the server cooldown. Signed-out clicks only reload widgets.
     let lastManualSyncAt = 0;
     let refreshInflight = 0;
 
@@ -131,11 +286,11 @@ import Layout from '../layouts/Layout.astro';
     });
 
     // Flip one item's done state: one POST, repaint the todo card from the
-    // response. Without a token it's a local-only flip (gone on refresh) with
+    // response. Signed out, it's a local-only flip (gone on refresh) with
     // a shake to hint it didn't persist.
-    function toggleTodo(id: string, el: HTMLElement) {
-      const token = writeToken();
-      if (!token) {
+    async function toggleTodo(id: string, el: HTMLElement) {
+      await sessionReady;
+      if (!loggedIn) {
         el.closest('.w-todo')?.classList.toggle('is-done');
         el.classList.add('w-shake');
         setTimeout(() => el.classList.remove('w-shake'), 400);
@@ -153,9 +308,14 @@ import Layout from '../layouts/Layout.astro';
     async function doToggle(id: string, nowDone: boolean) {
       const res = await fetch('/api/todo/toggle', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${writeToken()}` },
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id, done: nowDone }),
       });
+      if (res.status === 401) {
+        loggedIn = false;
+        renderSession();
+      }
       if (!res.ok) {
         // The intent never landed — drop it so a retry click recomputes from
         // the DOM instead of inverting off stale memory.
@@ -200,24 +360,28 @@ import Layout from '../layouts/Layout.astro';
         h < 5 ? '夜深了' : h < 11 ? '早上好' : h < 13 ? '中午好' : h < 18 ? '下午好' : '晚上好';
     }
 
-    // With a saved token: POST /api/feishu/sync, then reload widgets so the
-    // cards include that run. Overlap / cooldown / not_configured are not
-    // fatal — the spinner always stops and widgets still reload.
+    // Signed in: POST /api/feishu/sync, then reload widgets so the cards
+    // include that run. Overlap / cooldown / not_configured are not fatal —
+    // the spinner always stops and widgets still reload. Signed out, the
+    // button only reloads widgets (the board stays readable).
     async function syncThenRefresh() {
-      const token = writeToken();
+      await sessionReady;
       const now = Date.now();
-      if (token && shouldPostFeishuSync(true, lastManualSyncAt, now)) {
+      if (loggedIn && shouldPostFeishuSync(true, lastManualSyncAt, now)) {
         lastManualSyncAt = now;
         try {
           const res = await fetch('/api/feishu/sync', {
             method: 'POST',
-            headers: { Authorization: `Bearer ${token}` },
+            credentials: 'same-origin',
           });
           let reason: string | undefined;
           try {
             reason = feishuSyncReason(await res.json());
           } catch { /* non-JSON */ }
-          if (!isSoftFeishuSyncResult(res.status, reason)) {
+          if (res.status === 401) {
+            loggedIn = false;
+            renderSession();
+          } else if (!isSoftFeishuSyncResult(res.status, reason)) {
             console.warn('[pulse] feishu sync failed', res.status, reason ?? '');
           }
         } catch {

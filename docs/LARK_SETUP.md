@@ -11,8 +11,10 @@ hand, the same steps apply, just run the commands yourself.
 
 The Worker syncs the bitable itself every hour (`src/feishu.ts`, cron
 `0 * * * *`), using the Feishu app's bot (tenant) identity. The dashboard
-refresh button does the same sync when the page has a saved token, with a
-short debounce; overlapping runs return `in_progress` or `recently_synced`
+refresh button does the same sync once you are signed in (top-bar **登录**
+with `AGENT_TOKEN` — a desktop or home-screen shortcut does not need
+`?token=` in the URL), with a short debounce; overlapping runs return
+`in_progress` or `recently_synced`
 instead of calling Feishu again. Steps 0–4 below (lark-cli + launchd) are
 only needed for the fallback script. Apply
 `migrations/0002_feishu_sync_guard.sql` with the other D1 migrations so the
