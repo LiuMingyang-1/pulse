@@ -7,7 +7,7 @@ import {
 } from '../src/manual-sync';
 
 describe('manual feishu sync debounce', () => {
-  it('posts only when a token is saved and the debounce has elapsed', () => {
+  it('posts only when signed in and the debounce has elapsed', () => {
     expect(shouldPostFeishuSync(false, 0, FEISHU_SYNC_COOLDOWN_MS)).toBe(false);
     expect(shouldPostFeishuSync(true, 1_000, 1_000 + FEISHU_SYNC_COOLDOWN_MS - 1)).toBe(false);
     expect(shouldPostFeishuSync(true, 1_000, 1_000 + FEISHU_SYNC_COOLDOWN_MS)).toBe(true);

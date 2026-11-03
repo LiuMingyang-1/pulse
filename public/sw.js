@@ -1,5 +1,5 @@
 // Pulse service worker — bump CACHE_VERSION to invalidate old caches.
-const CACHE_VERSION = 'pulse-v7';
+const CACHE_VERSION = 'pulse-v8';
 const PRECACHE = ['/', '/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png', '/icon-180.png'];
 
 self.addEventListener('install', (e) => {
@@ -17,6 +17,13 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET' || url.origin !== location.origin) return;
+
+  // ?token= is a one-shot login secret. Don't store that URL as a cache key;
+  // the worker sets the session cookie and redirects to the clean path.
+  if (url.searchParams.has('token')) {
+    e.respondWith(fetch(e.request));
+    return;
+  }
 
   // Never cache API responses — always network.
   if (url.pathname.startsWith('/api/')) {

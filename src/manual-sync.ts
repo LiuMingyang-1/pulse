@@ -2,9 +2,9 @@ import { FEISHU_SYNC_COOLDOWN_MS } from './sync-cooldown';
 
 const SOFT_REASONS = new Set(['not_configured', 'in_progress', 'recently_synced']);
 
-/** True when this click should POST /api/feishu/sync (token + debounce elapsed). */
-export function shouldPostFeishuSync(hasToken: boolean, lastAttemptAt: number, now: number): boolean {
-  return hasToken && now - lastAttemptAt >= FEISHU_SYNC_COOLDOWN_MS;
+/** True when this click should POST /api/feishu/sync (signed in + debounce elapsed). */
+export function shouldPostFeishuSync(signedIn: boolean, lastAttemptAt: number, now: number): boolean {
+  return signedIn && now - lastAttemptAt >= FEISHU_SYNC_COOLDOWN_MS;
 }
 
 export function feishuSyncReason(body: unknown): string | undefined {

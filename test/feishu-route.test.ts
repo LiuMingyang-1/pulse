@@ -7,6 +7,7 @@ vi.mock('../src/feishu', () => ({
 
 import worker from '../src/worker';
 import { runFeishuSync, runFeishuSyncAfterPendingWrite } from '../src/feishu';
+import { SESSION_COOKIE, encodeSession } from '../src/session';
 
 const sync = vi.mocked(runFeishuSync);
 const syncAfterWrite = vi.mocked(runFeishuSyncAfterPendingWrite);
@@ -40,8 +41,22 @@ describe('POST /api/feishu/sync', () => {
     syncAfterWrite.mockReset();
   });
 
-  it('401 without the bearer token and does not sync', async () => {
+  it('401 without a bearer token or session cookie and does not sync', async () => {
     const res = await post();
+    expect(res.status).toBe(401);
+    expect(sync).not.toHaveBeenCalled();
+  });
+
+  it('200 with the session cookie and no Authorization header', async () => {
+    sync.mockResolvedValue({ ok: true, fetched: 1 });
+    const res = await post({ Cookie: `${SESSION_COOKIE}=${encodeSession('secret')}` });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, fetched: 1 });
+    expect(sync).toHaveBeenCalledOnce();
+  });
+
+  it('401 when the cookie is the raw token instead of the session encoding', async () => {
+    const res = await post({ Cookie: `${SESSION_COOKIE}=secret` });
     expect(res.status).toBe(401);
     expect(sync).not.toHaveBeenCalled();
   });

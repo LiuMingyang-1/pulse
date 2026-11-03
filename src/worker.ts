@@ -1,6 +1,17 @@
 import { Hono } from 'hono';
 import type { MiddlewareHandler } from 'hono';
 import { runFeishuSync, runFeishuSyncAfterPendingWrite } from './feishu';
+import {
+  bearerMatches,
+  checkLoginRateLimit,
+  clearedSessionCookie,
+  clientIp,
+  loginBodyTooLarge,
+  sessionCookie,
+  splitTokenQuery,
+  tokenMatches,
+  userMatches,
+} from './session';
 
 export interface Env {
   ASSETS: Fetcher;
@@ -26,33 +37,76 @@ const app = new Hono<{ Bindings: Env }>();
 
 // ── Auth ───────────────────────────────────────────────────────────────────
 
-// Constant-time string comparison — pad to the same length and accumulate the
-// XOR diff without early return so response timing doesn't leak the token.
-// (No node:crypto here: the worker doesn't enable nodejs_compat.)
-function safeEqual(a: string, b: string): boolean {
-  const len = Math.max(a.length, b.length);
-  let diff = a.length ^ b.length;
-  for (let i = 0; i < len; i++) {
-    // charCodeAt past the end returns NaN, which XORs as 0 — that plus the
-    // length seed above keeps the loop running full length on a mismatch.
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return diff === 0;
-}
-
-// Middleware: require `Authorization: Bearer <AGENT_TOKEN>` on agent-facing
-// routes. A missing/empty AGENT_TOKEN never matches, so the route 401s.
-const requireAuth: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
-  const auth = c.req.header('Authorization') ?? '';
-  const expected = `Bearer ${c.env.AGENT_TOKEN ?? ''}`;
-  if (!safeEqual(auth, expected)) {
+// Bearer only — agent pushes. A missing/empty AGENT_TOKEN never matches.
+const requireBearer: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
+  if (!bearerMatches(c.req.header('Authorization'), c.env.AGENT_TOKEN)) {
     return c.json({ error: 'unauthorized' }, 401);
   }
   await next();
 };
 
+// Cookie session or Bearer. Used by the browser (todo toggle, manual sync).
+const requireUser: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
+  if (!userMatches(c.req.header('Authorization'), c.req.header('Cookie'), c.env.AGENT_TOKEN)) {
+    return c.json({ error: 'unauthorized' }, 401);
+  }
+  await next();
+};
+
+function noStore(c: { header: (name: string, value: string) => void }) {
+  c.header('Cache-Control', 'no-store');
+}
+
 app.get('/api/health', (c) => {
   return c.json({ ok: true, ts: new Date().toISOString() });
+});
+
+// GET /api/session — whether this browser's cookie (or a Bearer header) is the
+// current AGENT_TOKEN. The cookie is HttpOnly, so the page cannot read it.
+app.get('/api/session', (c) => {
+  noStore(c);
+  const authenticated = userMatches(
+    c.req.header('Authorization'),
+    c.req.header('Cookie'),
+    c.env.AGENT_TOKEN,
+  );
+  return c.json({ authenticated });
+});
+
+// POST /api/login — body { token }. Sets the session cookie on a match.
+// Compared only to AGENT_TOKEN. Short per-IP rate limit (see session.ts).
+app.post('/api/login', async (c) => {
+  noStore(c);
+  const limit = checkLoginRateLimit(clientIp(c.req.header('CF-Connecting-IP')));
+  if (!limit.ok) {
+    c.header('Retry-After', String(limit.retryAfter));
+    return c.json({ error: 'rate_limited' }, 429);
+  }
+
+  let token = '';
+  try {
+    const text = await c.req.text();
+    if (loginBodyTooLarge(text)) return c.json({ error: 'invalid_json' }, 400);
+    const body = JSON.parse(text) as unknown;
+    if (body && typeof body === 'object' && 'token' in body && typeof body.token === 'string') {
+      token = body.token;
+    }
+  } catch {
+    return c.json({ error: 'invalid_json' }, 400);
+  }
+
+  if (!tokenMatches(token, c.env.AGENT_TOKEN)) {
+    return c.json({ error: 'unauthorized' }, 401);
+  }
+  c.header('Set-Cookie', sessionCookie(c.env.AGENT_TOKEN));
+  return c.json({ ok: true });
+});
+
+// POST /api/logout — clear the session cookie. Idempotent.
+app.post('/api/logout', (c) => {
+  noStore(c);
+  c.header('Set-Cookie', clearedSessionCookie());
+  return c.json({ ok: true });
 });
 
 // Parse the stored `data` JSON column into a real object before sending.
@@ -94,7 +148,7 @@ app.get('/api/widgets/:id', async (c) => {
 // POST /api/widgets/:id — agent push. Requires `Authorization: Bearer <AGENT_TOKEN>`.
 // Body: { title?: string, data: any, source?: 'cron'|'hermes'|'alma'|'manual'|'agent' }
 // Upserts the row; title falls back to existing row's title, then to :id.
-app.post('/api/widgets/:id', requireAuth, async (c) => {
+app.post('/api/widgets/:id', requireBearer, async (c) => {
   const id = c.req.param('id');
 
   let body: { title?: unknown; data?: unknown; source?: unknown };
@@ -163,7 +217,7 @@ interface PendingWrite {
   [k: string]: unknown;
 }
 
-app.post('/api/todo/toggle', requireAuth, async (c) => {
+app.post('/api/todo/toggle', requireUser, async (c) => {
   let body: { id?: unknown; done?: unknown };
   try {
     body = await c.req.json();
@@ -261,7 +315,7 @@ app.post('/api/todo/toggle', requireAuth, async (c) => {
 });
 
 // POST /api/feishu/sync — run the Feishu bitable sync now (same as cron).
-app.post('/api/feishu/sync', requireAuth, async (c) => {
+app.post('/api/feishu/sync', requireUser, async (c) => {
   const result = await runFeishuSync(c.env);
   const status = result.ok || result.reason === 'not_configured' ? 200 : 502;
   return c.json(result, status);
@@ -272,6 +326,24 @@ app.all('/api/*', (c) => {
 });
 
 app.all('*', (c) => {
+  // ?token=<AGENT_TOKEN> signs the browser in (same cookie as POST /api/login)
+  // and bounces to the URL with that param removed. Wrong tokens still drop
+  // the param so the secret does not stay in the address bar. API routes are
+  // matched above and are not redirected.
+  if (c.req.method === 'GET' || c.req.method === 'HEAD') {
+    const { token, location } = splitTokenQuery(c.req.url);
+    if (token !== null) {
+      const headers = new Headers({
+        Location: location,
+        'Cache-Control': 'no-store',
+      });
+      const limit = checkLoginRateLimit(clientIp(c.req.header('CF-Connecting-IP')));
+      if (limit.ok && c.env.AGENT_TOKEN && tokenMatches(token, c.env.AGENT_TOKEN)) {
+        headers.append('Set-Cookie', sessionCookie(c.env.AGENT_TOKEN));
+      }
+      return new Response(null, { status: 302, headers });
+    }
+  }
   return c.env.ASSETS.fetch(c.req.raw);
 });
 

@@ -96,7 +96,7 @@ npm install
 npx wrangler login
 npx wrangler d1 create pulse-db          # paste database_id into wrangler.toml
 npx wrangler d1 migrations apply pulse-db --remote
-npx wrangler secret put AGENT_TOKEN      # bearer token for agent pushes — make it random
+npx wrangler secret put AGENT_TOKEN      # agent bearer + browser login secret — make it random
 npm run deploy
 ```
 
@@ -135,27 +135,53 @@ npm run dev:worker                                # astro build + wrangler dev
 
 ```
 GET  /api/health                    → { ok, ts }
-GET  /api/widgets                   → [widget, ...]
-GET  /api/widgets/:id               → widget | 404
-POST /api/widgets/:id               → upsert (auth required)
-POST /api/todo/toggle               → flip a todo item {id, done} (auth required)
-POST /api/feishu/sync               → run the Feishu sync now (auth required)
+GET  /api/widgets                   → [widget, ...]          (no login)
+GET  /api/widgets/:id               → widget | 404           (no login)
+GET  /api/session                   → { authenticated }
+POST /api/login                     → { ok: true } + session cookie; body { token }
+POST /api/logout                    → clears the session cookie
+POST /api/widgets/:id               → upsert (Bearer only)
+POST /api/todo/toggle               → flip a todo item {id, done} (cookie or Bearer)
+POST /api/feishu/sync               → run the Feishu sync now (cookie or Bearer)
 ```
 
-Authed routes take `Authorization: Bearer <AGENT_TOKEN>`.
+`POST /api/widgets/:id` takes `Authorization: Bearer <AGENT_TOKEN>` only, so a
+browser session cannot push widget blobs.
 
-### Browser writes (todo check-off)
+`POST /api/todo/toggle` and `POST /api/feishu/sync` take that same Bearer
+header or the session cookie. `POST /api/login` compares the JSON `token`
+to `AGENT_TOKEN` and nothing else. On a match it sets
+`pulse_session` (`HttpOnly`; `Secure`; `SameSite=Lax`; `Path=/`; about 30
+days). `POST /api/logout` clears it. Login attempts are limited to 5 per
+minute per client IP, per isolate. The dashboard reads (`GET /api/widgets`)
+stay open without a session.
 
-Open the page once with `?token=<AGENT_TOKEN>` — the page stores it in
-`localStorage` and strips it from the address bar. After that, tapping a circle
-in 飞书待办 calls `POST /api/todo/toggle` (`{ "id", "done" }`, Bearer auth) —
-the Worker flips the item and queues a `pending_writes` entry in one
-read-modify-write; add the `?token=` URL to your home-screen bookmark. Without
-a token the circle still flips locally (with a shake hint) but the change is
-gone on refresh. The refresh button uses that same saved token: when it is
-present it POSTs `/api/feishu/sync` and then reloads widgets. Repeat clicks
-inside 15 seconds skip the Feishu call. Without a token the button only
-reloads widgets. The page's 60s poll never triggers a sync.
+### Browser writes (sign in, check-off, immediate sync)
+
+The board is readable without signing in. Checking off a todo and the refresh
+button's immediate Feishu sync require a session.
+
+Click **登录**, enter `AGENT_TOKEN`, and the top bar switches to **已登录** /
+**退出**. The cookie is HttpOnly, so page scripts never see the secret. A
+desktop shortcut or home-screen icon only needs the site URL — sign in once
+in that window. Do not put the token in the shortcut.
+
+A link that still has `?token=<AGENT_TOKEN>` signs you in (same cookie) and
+the token is removed from the address bar. A token left in `localStorage`
+(`pulse_token`) from older builds is exchanged for the cookie once, then
+deleted.
+
+After that, tapping a circle in 飞书待办 calls `POST /api/todo/toggle`
+(`{ "id", "done" }`, cookie session) — the Worker flips the item and queues a
+`pending_writes` entry in one read-modify-write. Without a session the circle
+still flips locally (with a shake hint) but the change is gone on refresh.
+The refresh button, when signed in, POSTs `/api/feishu/sync` and then reloads
+widgets. Repeat clicks inside 15 seconds skip the Feishu call. Signed out,
+the button only reloads widgets. The page's 60s poll never triggers a sync.
+
+The cookie is `Secure`. Browsers store it on `localhost` and on HTTPS. A
+non-localhost `http://` dev host will not keep the session — use the deployed
+URL or localhost.
 
 POST body: `{ "data": <any JSON>, "title"?: string, "source"?: string }` —
 `data` is required; `title` falls back to the existing row's title; `source`
@@ -236,10 +262,15 @@ To run it every 5 min on a Mac, copy
 `~/Library/LaunchAgents/com.pulse.sync-feishu.plist`, fill in your paths and
 env vars, then `launchctl load` it.
 
-## iPhone
+## iPhone and desktop shortcuts
 
-Open the deployed URL in Safari → Share → 添加到主屏幕. `manifest.webmanifest`,
+Open the deployed URL in Safari → Share → 添加到主屏幕. Then open the icon and
+tap **登录** once. The home-screen app does not share Safari's cookies, and
+the shortcut URL should be the plain site — no `?token=`. `manifest.webmanifest`,
 `sw.js` and icons are already wired up; it launches standalone.
+
+A desktop shortcut is the same: point it at the site, open it, and sign in.
+The session lasts about 30 days. You do not need the token in the URL.
 
 ## Cost notes
 
