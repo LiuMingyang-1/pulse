@@ -48,7 +48,7 @@ to know is in this README.
   falls through to `ASSETS`.
 - **Storage**: one D1 table `widgets` (`migrations/0001_widgets.sql`) — a row
   per widget holding its latest `data` JSON blob.
-- **Cron**: every 5 min (`*/5 * * * *`) runs the Feishu sync (see below).
+- **Cron**: hourly at minute 0 (`0 * * * *`, UTC) runs the Feishu sync (see below).
 
 ## Widget data contract
 
@@ -139,6 +139,7 @@ GET  /api/widgets                   → [widget, ...]
 GET  /api/widgets/:id               → widget | 404
 POST /api/widgets/:id               → upsert (auth required)
 POST /api/todo/toggle               → flip a todo item {id, done} (auth required)
+POST /api/feishu/sync               → run the Feishu sync now (auth required)
 ```
 
 Authed routes take `Authorization: Bearer <AGENT_TOKEN>`.
@@ -151,7 +152,10 @@ in 飞书待办 calls `POST /api/todo/toggle` (`{ "id", "done" }`, Bearer auth) 
 the Worker flips the item and queues a `pending_writes` entry in one
 read-modify-write; add the `?token=` URL to your home-screen bookmark. Without
 a token the circle still flips locally (with a shake hint) but the change is
-gone on refresh.
+gone on refresh. The refresh button uses that same saved token: when it is
+present it POSTs `/api/feishu/sync` and then reloads widgets. Repeat clicks
+inside 15 seconds skip the Feishu call. Without a token the button only
+reloads widgets. The page's 60s poll never triggers a sync.
 
 POST body: `{ "data": <any JSON>, "title"?: string, "source"?: string }` —
 `data` is required; `title` falls back to the existing row's title; `source`
@@ -177,8 +181,8 @@ curl -X POST https://<your-worker>.workers.dev/api/widgets/todo \
 
 ## Feishu / Lark sync (optional)
 
-**Recommended: in-Worker cron.** `src/feishu.ts` runs on the Worker's own
-`*/5` cron: it gets a `tenant_access_token`
+**Recommended: in-Worker cron.** `src/feishu.ts` runs on the Worker's hourly
+cron (`0 * * * *`, UTC): it gets a `tenant_access_token`
 from `FEISHU_APP_ID` / `FEISHU_APP_SECRET`, reads the bitable set in
 `wrangler.toml` `[vars]` (`FEISHU_BASE_TOKEN`, `FEISHU_TABLE_ID`), drains
 `todo.data.pending_writes` back to Feishu, and writes `todo` / `reminder` /
@@ -192,6 +196,14 @@ npx wrangler secret put FEISHU_APP_SECRET
 # trigger once without waiting for cron:
 curl -X POST -H "Authorization: Bearer $AGENT_TOKEN" https://<worker>/api/feishu/sync
 ```
+
+A sync that overlaps another run, or lands inside the 15s cooldown, returns
+`200` `{ "ok": true, "skipped": true, "reason": "in_progress" | "recently_synced" }`
+and does not call Feishu again. `not_configured` stays
+`200` `{ "ok": false, "reason": "not_configured" }`. The guard row lives in
+`migrations/0002_feishu_sync_guard.sql` — apply it with the other D1 migrations
+(`npx wrangler d1 migrations apply pulse-db --remote`). Until that migration
+is applied, syncs are still serialized inside one isolate.
 
 Don't run the Worker cron and the external script at the same time.
 

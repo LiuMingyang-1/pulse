@@ -1,17 +1,64 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
-import { runFeishuSync } from '../src/feishu';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
+import { runFeishuSync, runFeishuSyncAfterPendingWrite } from '../src/feishu';
+import { clearFeishuSyncIsolateMemoryForTests, resetFeishuSyncGuardForTests } from '../src/feishu-sync-guard';
+import { FEISHU_SYNC_COOLDOWN_MS } from '../src/sync-cooldown';
 
-// Minimal fake D1: one in-memory widgets table, understands the 3 statements feishu.ts uses.
+type GuardRow = { state: 'idle' | 'running'; until_ms: number; owner: string | null };
+
+// Minimal fake D1: widgets table (the statements feishu.ts already used) plus
+// the single-row feishu_sync_guard lock.
 function fakeDB(initial: Record<string, { data: string; updated_at: string }>, onRead?: () => void) {
   const rows = { ...initial };
+  let present = true;
+  let guard: GuardRow = { state: 'idle', until_ms: 0, owner: null };
   const db = {
     rows,
+    guard: {
+      reset() { present = true; guard = { state: 'idle', until_ms: 0, owner: null }; },
+      get(): GuardRow { return { ...guard }; },
+      force(next: GuardRow) { present = true; guard = { ...next }; },
+      drop() { present = false; },
+    },
     prepare(sql: string) {
       return {
         bind(...a: any[]) {
           return {
-            async first() { const r = rows[a[0]]; onRead?.(); return r ? { ...r } : null; },
+            async first() {
+              if (sql.includes('feishu_sync_guard')) {
+                return present ? { state: guard.state, until_ms: guard.until_ms } : null;
+              }
+              const r = rows[a[0]];
+              if (sql.includes('widgets')) onRead?.();
+              return r ? { ...r } : null;
+            },
             async run() {
+              if (sql.includes('feishu_sync_guard')) {
+                if (sql.includes("state = 'running'")) {
+                  const [until, owner, now] = a;
+                  if (present && guard.until_ms <= now) {
+                    guard = { state: 'running', until_ms: until, owner };
+                    return { meta: { changes: 1 } };
+                  }
+                  return { meta: { changes: 0 } };
+                }
+                if (sql.includes("state = 'idle'")) {
+                  const [until, owner] = a;
+                  if (present && guard.state === 'running' && guard.owner === owner) {
+                    guard = { state: 'idle', until_ms: until, owner: null };
+                    return { meta: { changes: 1 } };
+                  }
+                  return { meta: { changes: 0 } };
+                }
+                if (sql.includes('INSERT')) {
+                  if (!present) {
+                    present = true;
+                    guard = { state: 'running', until_ms: a[0], owner: a[1] };
+                    return { meta: { changes: 1 } };
+                  }
+                  return { meta: { changes: 0 } };
+                }
+                return { meta: { changes: 0 } };
+              }
               let changes = 0;
               if (sql.startsWith('UPDATE')) {
                 if (rows.todo && rows.todo.updated_at === a[3]) { rows.todo = { data: a[0], updated_at: a[1] }; changes = 1; }
@@ -26,6 +73,13 @@ function fakeDB(initial: Record<string, { data: string; updated_at: string }>, o
     },
   };
   return db;
+}
+
+// These tests call sync twice to simulate a later cron run. The cooldown is
+// real, so drop both the in-isolate memory and the fake D1 row between them.
+function rearm(db: { guard: { reset(): void } }) {
+  resetFeishuSyncGuardForTests();
+  db.guard.reset();
 }
 
 const env = (DB: any) => ({ DB, FEISHU_APP_ID: 'id', FEISHU_APP_SECRET: 's', FEISHU_BASE_TOKEN: 'b', FEISHU_TABLE_ID: 't' });
@@ -68,7 +122,12 @@ function mockFetch(opts: { batchCode?: number; staleWide?: boolean } = {}) {
   return { calls, state, batchCalls };
 }
 
-afterEach(() => vi.unstubAllGlobals());
+beforeEach(() => resetFeishuSyncGuardForTests());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+  resetFeishuSyncGuardForTests();
+});
 
 describe('runFeishuSync', () => {
   it('not_configured without secrets', async () => {
@@ -125,6 +184,7 @@ describe('runFeishuSync', () => {
     const m = mockFetch({ staleWide: true });
     const db = fakeDB({ todo: { data: JSON.stringify({ items: [{ id: 'r1', title: 'one', due: null, priority: 'P2', done: true, pending: true, prev_status: 'Doing' }], pending_writes: [{ record_id: 'r1', status: 'Done' }] }), updated_at: 'T0' } });
     await runFeishuSync(env(db) as any);
+    rearm(db); // a later cron run, outside the short cooldown
     const r2 = await runFeishuSync(env(db) as any);
     expect(m.batchCalls()).toHaveLength(1); // landed write never re-sent
     expect(r2.writes).toEqual({ sent: 0, failed: 0, held: 1, unsettled: 1 });
@@ -141,6 +201,7 @@ describe('runFeishuSync', () => {
     const db = fakeDB({ todo: { data: JSON.stringify({ items: [{ id: 'r1', title: 'one', due: null, priority: 'P2', done: true, pending: true, prev_status: 'Doing' }], pending_writes: [{ record_id: 'r1', status: 'Done' }] }), updated_at: 'T0' } });
     await runFeishuSync(env(db) as any); // send → held
     m.state.primary.r1 = 'Doing'; // external edit on the Feishu side
+    rearm(db);
     const r2 = await runFeishuSync(env(db) as any);
     expect(m.batchCalls()).toHaveLength(1); // no resend
     expect(r2.writes).toEqual({ sent: 0, failed: 0, held: 0, unsettled: 0 });
@@ -155,6 +216,7 @@ describe('runFeishuSync', () => {
     const db = fakeDB({ todo: { data: JSON.stringify({ items: [{ id: 'r1', title: 'one', due: null, priority: 'P2', done: true, pending: true, prev_status: 'Doing', completed_at: completedAt }], pending_writes: [{ record_id: 'r1', status: 'Done' }] }), updated_at: 'T0' } });
     await runFeishuSync(env(db) as any); // held — item keeps done + completed_at
     m.state.staleWide = false; // index catches up → wide read shows 'Done'
+    rearm(db);
     const r2 = await runFeishuSync(env(db) as any);
     expect(r2.writes).toEqual({ sent: 0, failed: 0, held: 0, unsettled: 0 });
     const todo = JSON.parse(db.rows.todo.data);
@@ -179,5 +241,155 @@ describe('runFeishuSync', () => {
     expect(r.reason).toContain('99991672');
     expect(r.reason).not.toMatch(/\bs\b|app_secret/);
     expect(Object.keys(db.rows)).toEqual([]);
+  });
+
+  it('not_configured does not consume the sync slot', async () => {
+    expect(await runFeishuSync({ DB: fakeDB({}) as any })).toEqual({ ok: false, reason: 'not_configured' });
+    const m = mockFetch();
+    const r = await runFeishuSync(env(fakeDB({})) as any);
+    expect(r.ok).toBe(true);
+    expect(r.skipped).toBeUndefined();
+    expect(m.calls.some((c) => c.url.includes('tenant_access_token'))).toBe(true);
+  });
+
+  it('a second sync inside the cooldown is recently_synced and does not call Feishu', async () => {
+    const m = mockFetch();
+    const db = fakeDB({});
+    const r1 = await runFeishuSync(env(db) as any);
+    expect(r1.ok).toBe(true);
+    const tokens = () => m.calls.filter((c) => c.url.includes('tenant_access_token')).length;
+    expect(tokens()).toBe(1);
+    const r2 = await runFeishuSync(env(db) as any);
+    expect(r2).toMatchObject({ ok: true, skipped: true, reason: 'recently_synced' });
+    expect(tokens()).toBe(1);
+    expect(db.guard.get().state).toBe('idle');
+  });
+
+  it('an overlapping sync is in_progress and shares one Feishu token fetch', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const calls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      calls.push(url);
+      const j = (o: unknown) => new Response(JSON.stringify(o), { status: 200 });
+      if (url.includes('tenant_access_token')) {
+        await gate;
+        return j({ code: 0, tenant_access_token: 'tok' });
+      }
+      if (url.includes('records/search')) return j({ code: 0, data: { items: [], has_more: false } });
+      return new Response('?', { status: 404 });
+    }));
+    const db = fakeDB({});
+    const p1 = runFeishuSync(env(db) as any);
+    await vi.waitFor(() => {
+      if (!calls.some((u) => u.includes('tenant_access_token'))) throw new Error('waiting for token fetch');
+    });
+    const r2 = await runFeishuSync(env(db) as any);
+    expect(r2).toMatchObject({ ok: true, skipped: true, reason: 'in_progress' });
+    expect(calls.filter((u) => u.includes('tenant_access_token'))).toHaveLength(1);
+    release();
+    const r1 = await p1;
+    expect(r1.ok).toBe(true);
+    expect(r1.skipped).toBeUndefined();
+    const r3 = await runFeishuSync(env(db) as any);
+    expect(r3).toMatchObject({ ok: true, skipped: true, reason: 'recently_synced' });
+    expect(calls.filter((u) => u.includes('tenant_access_token'))).toHaveLength(1);
+  });
+
+  it('another isolate sees the D1 lock and does not steal it', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const calls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      calls.push(url);
+      const j = (o: unknown) => new Response(JSON.stringify(o), { status: 200 });
+      if (url.includes('tenant_access_token')) {
+        await gate;
+        return j({ code: 0, tenant_access_token: 'tok' });
+      }
+      if (url.includes('records/search')) return j({ code: 0, data: { items: [], has_more: false } });
+      return new Response('?', { status: 404 });
+    }));
+    const db = fakeDB({});
+    const p1 = runFeishuSync(env(db) as any);
+    await vi.waitFor(() => {
+      if (!calls.some((u) => u.includes('tenant_access_token'))) throw new Error('waiting for token fetch');
+    });
+    const owner = db.guard.get().owner;
+    expect(owner).toEqual(expect.any(String));
+    clearFeishuSyncIsolateMemoryForTests();
+    const r2 = await runFeishuSync(env(db) as any);
+    expect(r2).toMatchObject({ ok: true, skipped: true, reason: 'in_progress' });
+    expect(db.guard.get().owner).toBe(owner);
+    expect(calls.filter((u) => u.includes('tenant_access_token'))).toHaveLength(1);
+    release();
+    await p1;
+    clearFeishuSyncIsolateMemoryForTests();
+    const r3 = await runFeishuSync(env(db) as any);
+    expect(r3).toMatchObject({ ok: true, skipped: true, reason: 'recently_synced' });
+    expect(calls.filter((u) => u.includes('tenant_access_token'))).toHaveLength(1);
+  });
+
+  it('a busy D1 lock is left to its owner', async () => {
+    const m = mockFetch();
+    const db = fakeDB({});
+    db.guard.force({ state: 'running', until_ms: Date.now() + 60_000, owner: 'other-isolate' });
+    const r = await runFeishuSync(env(db) as any);
+    expect(r).toMatchObject({ ok: true, skipped: true, reason: 'in_progress' });
+    expect(db.guard.get().owner).toBe('other-isolate');
+    expect(m.calls.filter((c) => c.url.includes('tenant_access_token'))).toHaveLength(0);
+  });
+
+  it('creates the guard row when it is missing', async () => {
+    mockFetch();
+    const db = fakeDB({});
+    db.guard.drop();
+    const r = await runFeishuSync(env(db) as any);
+    expect(r.ok).toBe(true);
+    expect(r.skipped).toBeUndefined();
+    expect(db.guard.get()).toMatchObject({ state: 'idle', owner: null });
+  });
+
+  it('a stale D1 lock can be taken over', async () => {
+    mockFetch();
+    const db = fakeDB({});
+    db.guard.force({ state: 'running', until_ms: Date.now() - 1, owner: 'dead' });
+    const r = await runFeishuSync(env(db) as any);
+    expect(r.ok).toBe(true);
+    expect(r.skipped).toBeUndefined();
+    expect(db.guard.get()).toMatchObject({ state: 'idle', owner: null });
+  });
+
+  it('missing guard table still syncs once, then the in-isolate cooldown skips', async () => {
+    const m = mockFetch();
+    const db = fakeDB({});
+    const orig = db.prepare.bind(db);
+    db.prepare = (sql: string) => {
+      if (sql.includes('feishu_sync_guard')) throw new Error('no such table: feishu_sync_guard');
+      return orig(sql);
+    };
+    const r1 = await runFeishuSync(env(db) as any);
+    expect(r1.ok).toBe(true);
+    const tokens = () => m.calls.filter((c) => c.url.includes('tenant_access_token')).length;
+    expect(tokens()).toBe(1);
+    const r2 = await runFeishuSync(env(db) as any);
+    expect(r2).toMatchObject({ ok: true, skipped: true, reason: 'recently_synced' });
+    expect(tokens()).toBe(1);
+  });
+
+  it('pending-write retry waits out the cooldown and syncs once more', async () => {
+    vi.useFakeTimers();
+    const m = mockFetch();
+    const db = fakeDB({});
+    const first = await runFeishuSync(env(db) as any);
+    expect(first.ok).toBe(true);
+    const tokens = () => m.calls.filter((c) => c.url.includes('tenant_access_token')).length;
+    expect(tokens()).toBe(1);
+    const pending = runFeishuSyncAfterPendingWrite(env(db) as any);
+    await vi.advanceTimersByTimeAsync(FEISHU_SYNC_COOLDOWN_MS);
+    const second = await pending;
+    expect(second.skipped).toBeUndefined();
+    expect(second.ok).toBe(true);
+    expect(tokens()).toBe(2);
   });
 });
