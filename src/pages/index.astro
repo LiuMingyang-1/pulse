@@ -15,6 +15,9 @@ import Layout from '../layouts/Layout.astro';
       <div class="account">
         <button type="button" id="login-btn" class="glass account-btn">登录</button>
         <span id="account-state" class="account-state" hidden>已登录</span>
+        <span id="account-avatar" class="account-avatar" hidden>
+          <img src="/avatar.jpg" alt="" width="36" height="36" />
+        </span>
         <button type="button" id="logout-btn" class="glass account-btn" hidden>退出</button>
       </div>
     </header>
@@ -124,6 +127,7 @@ import Layout from '../layouts/Layout.astro';
     function renderSession() {
       document.getElementById('login-btn')!.hidden = loggedIn;
       document.getElementById('account-state')!.hidden = !loggedIn;
+      document.getElementById('account-avatar')!.hidden = !loggedIn;
       document.getElementById('logout-btn')!.hidden = !loggedIn;
     }
 
