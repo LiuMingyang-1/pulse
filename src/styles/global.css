@@ -90,10 +90,12 @@
   position: sticky;
   top: 0;
   z-index: 10;
-  display: flex;
+  display: grid;
+  /* Equal side tracks keep 首页 on the bar's midpoint even when the
+     signed-in cluster (avatar + 退出) is wider than the refresh button. */
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  column-gap: 8px;
   padding: calc(14px + env(safe-area-inset-top)) 0 14px;
 }
 
@@ -107,6 +109,7 @@
 .round {
   display: grid;
   place-items: center;
+  justify-self: start;
   width: 46px;
   height: 46px;
   flex: none;
@@ -121,6 +124,7 @@
 .pill {
   display: flex;
   align-items: center;
+  justify-self: center;
   padding: 5px;
   border-radius: 999px;
   min-width: 0;
@@ -138,8 +142,10 @@
 .account {
   display: flex;
   align-items: center;
+  justify-self: end;
   gap: 8px;
   flex: none;
+  min-width: 0;
 }
 .account-btn {
   height: 40px;
@@ -148,14 +154,6 @@
   font-size: 14px;
   font-weight: 600;
   color: var(--ink);
-}
-.account-state {
-  font-size: 13px;
-  font-weight: 650;
-  color: #fff;
-  letter-spacing: 0.01em;
-  text-shadow: 0 1px 8px rgba(30, 60, 110, 0.28);
-  white-space: nowrap;
 }
 /* Circular portrait with a light translucent wrap. Same frosted material as
    the pill around 首页, thicker and a bit more opaque so the ring still
