@@ -161,7 +161,7 @@ stay open without a session.
 The board is readable without signing in. Checking off a todo and the refresh
 button's immediate Feishu sync require a session.
 
-Click **登录**, enter `AGENT_TOKEN`, and the top bar switches to **已登录** /
+Click **登录**, enter `AGENT_TOKEN`, and the top bar switches to the avatar and
 **退出**. The cookie is HttpOnly, so page scripts never see the secret. A
 desktop shortcut or home-screen icon only needs the site URL — sign in once
 in that window. Do not put the token in the shortcut.
