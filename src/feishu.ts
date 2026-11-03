@@ -5,6 +5,15 @@ import {
   toReminder, toSchedule, toTodo,
   type FeishuRecord, type PendingWrite, type TodoData,
 } from './feishu-transform';
+import {
+  beginFeishuSync,
+  currentFeishuSyncFlight,
+  feishuSyncRetryDelayMs,
+  finishFeishuSyncReservation,
+  sleepForFeishuRetry,
+  type SyncReservation,
+} from './feishu-sync-guard';
+import { FEISHU_SYNC_RETRY_BUDGET_MS } from './sync-cooldown';
 
 export interface FeishuEnv {
   DB: D1Database;
@@ -17,6 +26,9 @@ export interface FeishuEnv {
 export interface FeishuSyncResult {
   ok: boolean;
   reason?: string;
+  /** True when this call did not touch Feishu (slot busy or cooldown). */
+  skipped?: boolean;
+  retry_after_ms?: number;
   fetched?: number;
   writes?: { sent: number; failed: number; held: number; unsettled: number };
   todo?: 'written' | 'skipped_read_failed' | 'skipped_concurrent_edit';
@@ -39,7 +51,7 @@ async function feishuJson(res: Response, what: string): Promise<any> {
   return body;
 }
 
-// One fresh tenant token per run (2h TTL, 5-min cron — caching isn't worth it).
+// One fresh tenant token per run (2h TTL, hourly cron — caching isn't worth it).
 async function getTenantToken(env: FeishuEnv): Promise<string> {
   const res = await fetch(`${API}/auth/v3/tenant_access_token/internal`, {
     method: 'POST',
@@ -121,10 +133,60 @@ async function upsert(env: FeishuEnv, id: string, title: string, data: unknown, 
   ).bind(id, title, JSON.stringify(data), now, SOURCE).run();
 }
 
+function isSyncReservation(value: SyncReservation | FeishuSyncResult): value is SyncReservation {
+  return 'owner' in value && typeof value.releaseFlight === 'function';
+}
+
 export async function runFeishuSync(env: FeishuEnv): Promise<FeishuSyncResult> {
   if (!env.FEISHU_APP_ID || !env.FEISHU_APP_SECRET || !env.FEISHU_BASE_TOKEN || !env.FEISHU_TABLE_ID) {
     return { ok: false, reason: 'not_configured' };
   }
+
+  const begun = await beginFeishuSync(env.DB);
+  if (!isSyncReservation(begun)) {
+    console.log('[feishu] sync skipped', begun.reason);
+    return begun;
+  }
+
+  try {
+    return await runFeishuSyncBody(env);
+  } finally {
+    try {
+      await finishFeishuSyncReservation(env.DB, begun);
+    } finally {
+      begun.releaseFlight();
+    }
+  }
+}
+
+/**
+ * Toggle write-back. If the slot is busy or cooling down, wait (bounded by
+ * `FEISHU_SYNC_RETRY_BUDGET_MS`, inside waitUntil's post-response limit) and
+ * try once more so the new pending write is not stuck until the hourly cron.
+ */
+export async function runFeishuSyncAfterPendingWrite(env: FeishuEnv): Promise<FeishuSyncResult> {
+  const first = await runFeishuSync(env);
+  if (!first.skipped) return first;
+
+  const deadline = Date.now() + FEISHU_SYNC_RETRY_BUDGET_MS;
+  const flight = currentFeishuSyncFlight();
+  if (flight) {
+    const ac = new AbortController();
+    await Promise.race([
+      flight.then(() => ac.abort(), () => ac.abort()),
+      sleepForFeishuRetry(Math.max(0, deadline - Date.now()), ac.signal),
+    ]);
+    ac.abort();
+  }
+
+  const remain = deadline - Date.now();
+  if (remain <= 0) return first;
+  const delay = Math.min(await feishuSyncRetryDelayMs(env.DB), remain);
+  if (delay > 0) await sleepForFeishuRetry(delay);
+  return runFeishuSync(env);
+}
+
+async function runFeishuSyncBody(env: FeishuEnv): Promise<FeishuSyncResult> {
   try {
     // Read the todo row (pending_writes + local flags) and remember its
     // updated_at for the optimistic write guard below.

@@ -9,9 +9,14 @@ hand, the same steps apply, just run the commands yourself.
 
 ## Option A — Worker cron (recommended)
 
-The Worker syncs the bitable itself every 5 minutes (`src/feishu.ts`), using
-the Feishu app's bot (tenant) identity. Steps 0–4 below (lark-cli + launchd)
-are only needed for the fallback script.
+The Worker syncs the bitable itself every hour (`src/feishu.ts`, cron
+`0 * * * *`), using the Feishu app's bot (tenant) identity. The dashboard
+refresh button does the same sync when the page has a saved token, with a
+short debounce; overlapping runs return `in_progress` or `recently_synced`
+instead of calling Feishu again. Steps 0–4 below (lark-cli + launchd) are
+only needed for the fallback script. Apply
+`migrations/0002_feishu_sync_guard.sql` with the other D1 migrations so the
+lock is shared across isolates.
 
 1. 飞书开放平台 → 你的应用（企业自建应用）→ **权限管理**，开通多维表格记录读写：
    `base:record:read`、`base:record:update`（后台若显示旧名，则开

@@ -28,6 +28,7 @@ import Layout from '../layouts/Layout.astro';
     import { registry } from '../widgets/registry';
     import { generic } from '../widgets/generic';
     import { esc, timeAgo } from '../widgets/ui';
+    import { feishuSyncReason, isSoftFeishuSyncResult, shouldPostFeishuSync } from '../manual-sync';
     import type { Widget, WidgetDef } from '../widgets/types';
 
     const cardsEl = document.getElementById('cards')!;
@@ -105,6 +106,11 @@ import Layout from '../layouts/Layout.astro';
       history.replaceState(null, '', location.pathname);
     }
     const writeToken = () => localStorage.getItem(TOKEN_KEY);
+
+    // Button-only Feishu sync. The 60s /api/widgets poll does not sync.
+    // Same pulse_token as todo check-off; debounce matches the server cooldown.
+    let lastManualSyncAt = 0;
+    let refreshInflight = 0;
 
     // Client-side serialization is only a courtesy — POST /api/todo/toggle
     // does the flip inside the Worker so the server is the real serialization
@@ -194,11 +200,47 @@ import Layout from '../layouts/Layout.astro';
         h < 5 ? '夜深了' : h < 11 ? '早上好' : h < 13 ? '中午好' : h < 18 ? '下午好' : '晚上好';
     }
 
+    // With a saved token: POST /api/feishu/sync, then reload widgets so the
+    // cards include that run. Overlap / cooldown / not_configured are not
+    // fatal — the spinner always stops and widgets still reload.
+    async function syncThenRefresh() {
+      const token = writeToken();
+      const now = Date.now();
+      if (token && shouldPostFeishuSync(true, lastManualSyncAt, now)) {
+        lastManualSyncAt = now;
+        try {
+          const res = await fetch('/api/feishu/sync', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          let reason: string | undefined;
+          try {
+            reason = feishuSyncReason(await res.json());
+          } catch { /* non-JSON */ }
+          if (!isSoftFeishuSyncResult(res.status, reason)) {
+            console.warn('[pulse] feishu sync failed', res.status, reason ?? '');
+          }
+        } catch {
+          // Network error — still show the widgets D1 already has.
+        }
+      }
+      await refresh();
+    }
+
     const btn = document.getElementById('refresh')!;
     btn.addEventListener('click', async () => {
+      refreshInflight++;
       btn.classList.add('spin');
-      await refresh();
-      setTimeout(() => btn.classList.remove('spin'), 500);
+      try {
+        await syncThenRefresh();
+      } finally {
+        refreshInflight--;
+        if (refreshInflight === 0) {
+          setTimeout(() => {
+            if (refreshInflight === 0) btn.classList.remove('spin');
+          }, 500);
+        }
+      }
     });
 
     tick();

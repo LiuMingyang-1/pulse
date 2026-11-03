@@ -20,4 +20,4 @@ FEISHU_BASE_TOKEN = "KkKJbeFuaayQHysyH1Wc9frRnPe"
 FEISHU_TABLE_ID = "tbl9BFvxgcbQgJ5D"
 
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["0 * * * *"]

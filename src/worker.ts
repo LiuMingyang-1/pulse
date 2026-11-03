@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import type { MiddlewareHandler } from 'hono';
-import { runFeishuSync } from './feishu';
+import { runFeishuSync, runFeishuSyncAfterPendingWrite } from './feishu';
 
 export interface Env {
   ASSETS: Fetcher;
@@ -241,10 +241,12 @@ app.post('/api/todo/toggle', requireAuth, async (c) => {
     .bind(JSON.stringify(data), now, 'todo')
     .run();
 
-  // Push the queued write to Feishu right away instead of waiting up to one
-  // cron interval — the response can't await it or the click feels frozen.
+  // Push the queued write to Feishu right away instead of waiting for the
+  // hourly cron — the response can't await it or the click feels frozen.
+  // A busy slot or the short cooldown waits (bounded) and tries once more
+  // so the new pending write is not stuck until the next hour.
   c.executionCtx.waitUntil(
-    runFeishuSync(c.env).catch((err) => {
+    runFeishuSyncAfterPendingWrite(c.env).catch((err) => {
       console.error('[feishu] toggle-triggered sync failed:', err?.message ?? err);
     }),
   );
