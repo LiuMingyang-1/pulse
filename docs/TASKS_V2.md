@@ -87,6 +87,8 @@ D1 没有新表、没有新列。回滚不需要 down migration。不要用不�
 
 用 `wrangler secret` 不适合这个开关（它不是密钥）。在 Worker 变量里改，然后等一轮同步（刷新按钮或 cron），再看 `todo.data.tasks_schema`。
 
+`wrangler.toml` 里 `keep_vars = true`，而且 **不要** 把 `TASKS_SCHEMA` 写进 `[vars]`。下次正常的 `wrangler deploy`（含 GitHub Actions 那条不带额外参数的 deploy）会保留远程的明文 `TASKS_SCHEMA`，无论当时是 `compat` 还是 `v2`。`[vars]` 里的 `FEISHU_BASE_TOKEN` 和 `FEISHU_TABLE_ID` 仍会按文件里的值上传，同名远程值被覆盖。secret 本来就不会被 deploy 删掉。回滚仍是改或删除远程变量，不是改这一行。
+
 1. 部署后先什么都不设。打开看板，待办、今日安排、日历订阅应与切换前一致。日志里不应出现 `[feishu] tasks-schema`。
 2. 可选 compat：`TASKS_SCHEMA=compat`。再同步一次。`tasks_schema` 应为 `gate=compat`、`capability=v2`、`read=legacy`。勾一条再取消：飞书里复选框和 Status 一起变，看板仍按 Status 显示。`write_audit` 有记录。
 3. 确认队列空（或只剩你刚做的、已经落地的写入）。
