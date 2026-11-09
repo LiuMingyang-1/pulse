@@ -18,6 +18,12 @@ migrations_dir = "migrations"
 [vars]
 FEISHU_BASE_TOKEN = "KkKJbeFuaayQHysyH1Wc9frRnPe"
 FEISHU_TABLE_ID = "tbl9BFvxgcbQgJ5D"
+# Tasks cutover is off until docs/TASKS_V2.md says otherwise.
+# Do not set TASKS_SCHEMA here. Unset = legacy Status behavior.
+# Optional renames (names, never field ids):
+# FEISHU_FIELD_COMPLETED = "已完成"
+# FEISHU_FIELD_PLAN_DATE = "计划日期"
+# TASKS_SCHEMA = "legacy"   # legacy | compat | v2
 
 [triggers]
 crons = ["0 * * * *"]

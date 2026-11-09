@@ -66,5 +66,48 @@ describe('scripts/sync-feishu.mjs (dry-run)', () => {
   it('schedule: start ascending, same start → priority', () => {
     const { schedule } = runDry();
     expect(schedule.events.map((e: any) => e.title)).toEqual(['s9', 's0', 's2']);
+    expect(schedule.planned).toBeUndefined();
+  });
+});
+
+describe('scripts/sync-feishu.mjs v2 gate', () => {
+  it('unions an unscheduled today pick with a midnight-crossing block and keeps the ICS id', () => {
+    const vdir = mkdtempSync(join(tmpdir(), 'pulse-sync-v2-'));
+    const start = `${today}T23:00:00.000+08:00`;
+    const end = new Date(Date.parse(start) + 2 * 3600_000).toISOString().replace('Z', '+00:00');
+    // [Task, Due, Priority, Status, Type, Start, End, 已完成, 计划日期]
+    const vrows: Array<[string, unknown[]]> = [
+      ['cross', ['cross', null, ['P2'], ['Inbox'], ['Task'], start, end, false, null]],
+      ['pick', ['pick', null, ['P1'], ['Doing'], ['Task'], null, null, false, today]],
+      ['done', ['done', null, ['P2'], ['Done'], ['Task'], at('08:00'), at('09:00'), true, null]],
+    ];
+    writeFileSync(join(vdir, 'payload.json'), JSON.stringify({
+      data: { data: vrows.map(([, r]) => r), record_id_list: vrows.map(([id]) => id) },
+    }));
+    writeFileSync(
+      join(vdir, 'lark-cli'),
+      `#!/usr/bin/env node\nprocess.stdout.write(require('fs').readFileSync(${JSON.stringify(join(vdir, 'payload.json'))}, 'utf8'));\n`,
+    );
+    chmodSync(join(vdir, 'lark-cli'), 0o755);
+    try {
+      const out = execFileSync('node', ['scripts/sync-feishu.mjs', '--dry-run'], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${vdir}${delimiter}${process.env.PATH}`,
+          LARK_APP_TOKEN: 'app', LARK_TABLE_ID: 'tbl',
+          PULSE_TOKEN: '', AGENT_TOKEN: '',
+          TASKS_SCHEMA: 'v2',
+        },
+      });
+      const parsed = JSON.parse(out.slice(out.indexOf('\n{\n') + 1));
+      expect(parsed.schedule.events.map((e: { title: string }) => e.title)).toEqual(['cross']);
+      expect(parsed.schedule.planned.map((p: { id: string }) => p.id)).toEqual(['pick']);
+      expect(parsed.todo.items.map((i: { id: string }) => i.id)).toEqual(['pick', 'cross']);
+      expect(parsed.todo.done_items).toBeUndefined();
+      expect(parsed.calendar.events.map((e: { id: string }) => e.id)).toEqual(['done', 'cross']);
+    } finally {
+      rmSync(vdir, { recursive: true, force: true });
+    }
   });
 });

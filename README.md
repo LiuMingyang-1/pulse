@@ -56,16 +56,25 @@ Each card renders `data` as JSON:
 
 ```
 schedule.data = { "events": [{ "title": string,
-                               "start": ISO8601, "end": ISO8601 }] }
-                only today's slotted events; the card sorts/marks live/past
-                client-side so it stays correct between syncs
+                               "start": ISO8601, "end": ISO8601,
+                               "id"?: string }],
+                  "planned"?: [{ "id": string, "title": string,
+                                 "priority": string, "plan_date": "YYYY-MM-DD" }],
+                  "schema"?: "v2" }
+                legacy (default): events are Status=Doing with both Scheduled
+                times and Scheduled Start today. After TASKS_SCHEMA=v2 the
+                card is a union — timed intervals that overlap today (including
+                across midnight) plus 计划日期=today with no valid interval.
+                `planned` is absent on legacy payloads; old clients ignore it.
 calendar.data = { "events": [{ "id"?: string,   // Feishu record_id → stable ICS UID
                               "title": string,
                               "start": ISO8601, "end": ISO8601 }] }
                 server-internal feed row — excluded from /api/widgets reads
-                and never rendered; same slotted events as schedule but over
-                a 3-days-back / 14-ahead window, served by /api/calendar.ics
-                as an iCalendar subscription
+                and never rendered; any record with both Scheduled times whose
+                start is in a 3-days-back / 14-ahead window, any Status
+                (Done keeps its times). UID is record_id@pulse.
+                Plan date and the completion checkbox do not change this feed.
+                Served by /api/calendar.ics. No Apple or Feishu calendar write.
 reminder.data = { "items": [{ "title": string, "due": ISO8601 }] }
                 card shows the next-3-days window
 todo.data     = { "pending_count": number,    // unfinished only
@@ -81,14 +90,19 @@ todo.data     = { "pending_count": number,    // unfinished only
                                                     // toggles stamp it, sync
                                                     // carries/stamps it
                               "sync_failed"?: bool }],
-                  "done_items"?: [{ same shape }],  // Status=Done in Feishu AND
-                                                    // completed today
-                                                    // (completed_at stamped on
-                                                    // first observation);
-                                                    // sunken below the pager
+                  "done_items"?: [{ same shape }],  // completed today. Legacy:
+                                                    // Status=Done. v2: checkbox
+                                                    // true, Status is not OR'd in
                   "pending_writes"?: [{ "record_id": string,
-                                       "status": string,
-                                       "requested_at": ISO8601 }] }
+                                       "status": string,       // always, so rollback can drain
+                                       "completed"?: bool,    // checkbox target; absent on old entries
+                                       "schema"?: "v2",
+                                       "requested_at": ISO8601 }],
+                  "tasks_schema"?: { "gate", "read", "capability",
+                                     "completed_field", "plan_date_field" },
+                  "write_audit"?: [{ "at", "record_id", "done", "status", "completed" }] }
+                Default gate is legacy: no new fields, Status is still authority.
+                Cutover, dual-write, and rollback: docs/TASKS_V2.md
                 tapping a circle sinks the item into a grayed, struck-through
                 done section (tap again to undo); the browser POSTs the whole
                 blob and each sync drains `pending_writes` back to Feishu
