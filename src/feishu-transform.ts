@@ -233,6 +233,18 @@ export function toReminder(records: FeishuRecord[]) {
   return { items };
 }
 
+// Start ascending by timestamp; same instant → higher priority (smaller P
+// number) first, same semantics as byDueThenPriority. Equal keys return 0.
+function byStartThenPriority(
+  a: { start: string; priority: string },
+  b: { start: string; priority: string },
+): number {
+  const sa = Date.parse(a.start);
+  const sb = Date.parse(b.start);
+  if (sa !== sb) return sa - sb;
+  return priorityRank(a.priority) - priorityRank(b.priority);
+}
+
 export function toSchedule(records: FeishuRecord[], now: Date = new Date()) {
   const events = records
     .filter(({ row }) => first(row[3]) === 'Doing' && row[5] && row[6] && isTodayDate(row[5], now))
@@ -242,15 +254,43 @@ export function toSchedule(records: FeishuRecord[], now: Date = new Date()) {
       end: str(row[6]) as string,
       priority: first(row[2]) ?? 'P2',
     }))
-    .sort((a, b) => {
-      // Start ascending by timestamp (isTodayDate already guarantees it
-      // parses); same instant → higher priority (smaller P number) first,
-      // same semantics as byDueThenPriority. Equal keys return 0.
-      const sa = Date.parse(a.start);
-      const sb = Date.parse(b.start);
-      if (sa !== sb) return sa - sb;
-      return priorityRank(a.priority) - priorityRank(b.priority);
-    });
+    .sort(byStartThenPriority);
+  return { events };
+}
+
+// calendar feed contract: { events: [{id, title, start, end, priority}] } —
+// the multi-day sibling of toSchedule, backing the /api/calendar.ics
+// subscription. Same Doing + slotted filter (any Type — talks/interviews
+// belong on the calendar too), but the Scheduled Start may fall anywhere in
+// a window around `now` instead of today only. `id` carries the record_id so
+// ICS UIDs stay stable across syncs.
+export const CALENDAR_PAST_MS = 3 * 24 * 3600 * 1000;
+export const CALENDAR_FUTURE_MS = 14 * 24 * 3600 * 1000;
+
+export function toCalendar(
+  records: FeishuRecord[],
+  now: Date = new Date(),
+  window: { pastMs: number; futureMs: number } = {
+    pastMs: CALENDAR_PAST_MS,
+    futureMs: CALENDAR_FUTURE_MS,
+  },
+) {
+  const lo = now.getTime() - window.pastMs;
+  const hi = now.getTime() + window.futureMs;
+  const events = records
+    .filter(({ row }) => first(row[3]) === 'Doing' && row[5] && row[6])
+    .map(({ row, record_id }) => ({
+      id: record_id,
+      title: str(row[0]) ?? '(untitled)',
+      start: str(row[5]) as string,
+      end: str(row[6]) as string,
+      priority: first(row[2]) ?? 'P2',
+    }))
+    .filter((e) => {
+      const t = Date.parse(e.start);
+      return t >= lo && t <= hi;
+    })
+    .sort(byStartThenPriority);
   return { events };
 }
 

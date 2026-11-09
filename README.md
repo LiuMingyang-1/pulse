@@ -59,6 +59,13 @@ schedule.data = { "events": [{ "title": string,
                                "start": ISO8601, "end": ISO8601 }] }
                 only today's slotted events; the card sorts/marks live/past
                 client-side so it stays correct between syncs
+calendar.data = { "events": [{ "id"?: string,   // Feishu record_id → stable ICS UID
+                              "title": string,
+                              "start": ISO8601, "end": ISO8601 }] }
+                server-internal feed row — excluded from /api/widgets reads
+                and never rendered; same slotted events as schedule but over
+                a 3-days-back / 14-ahead window, served by /api/calendar.ics
+                as an iCalendar subscription
 reminder.data = { "items": [{ "title": string, "due": ISO8601 }] }
                 card shows the next-3-days window
 todo.data     = { "pending_count": number,    // unfinished only
@@ -143,6 +150,8 @@ POST /api/logout                    → clears the session cookie
 POST /api/widgets/:id               → upsert (Bearer only)
 POST /api/todo/toggle               → flip a todo item {id, done} (cookie or Bearer)
 POST /api/feishu/sync               → run the Feishu sync now (cookie or Bearer)
+GET  /api/calendar.ics              → text/calendar feed (cookie, Bearer, or ?token=<feed credential>)
+GET  /api/calendar-link             → { feed, subscribe } URLs (cookie or Bearer)
 ```
 
 `POST /api/widgets/:id` takes `Authorization: Bearer <AGENT_TOKEN>` only, so a
@@ -212,7 +221,7 @@ cron (`0 * * * *`, UTC): it gets a `tenant_access_token`
 from `FEISHU_APP_ID` / `FEISHU_APP_SECRET`, reads the bitable set in
 `wrangler.toml` `[vars]` (`FEISHU_BASE_TOKEN`, `FEISHU_TABLE_ID`), drains
 `todo.data.pending_writes` back to Feishu, and writes `todo` / `reminder` /
-`schedule` straight into D1 (`source = 'feishu-cron'`). No host needs to stay
+`schedule` / `calendar` straight into D1 (`source = 'feishu-cron'`). No host needs to stay
 awake. Setup (Feishu app permissions + secrets) is in
 [docs/LARK_SETUP.md](docs/LARK_SETUP.md#option-a--worker-cron-recommended).
 
@@ -235,7 +244,7 @@ Don't run the Worker cron and the external script at the same time.
 
 **Fallback: external script.** `scripts/sync-feishu.mjs` pulls tasks from a Feishu bitable via
 [lark-cli](https://github.com/jeking2/lark-cli) and pushes the `todo`,
-`reminder`, and `schedule` widgets. Run it on whatever host has your Feishu
+`reminder`, `schedule`, and `calendar` widgets. Run it on whatever host has your Feishu
 credentials (your Mac, a NAS — anywhere), not in the Worker.
 
 ```sh
@@ -271,6 +280,22 @@ the shortcut URL should be the plain site — no `?token=`. `manifest.webmanifes
 
 A desktop shortcut is the same: point it at the site, open it, and sign in.
 The session lasts about 30 days. You do not need the token in the URL.
+
+### Subscribe to the calendar feed
+
+While signed in, the top bar shows a calendar button; tapping it opens iOS
+Calendar's subscribe sheet via `webcal://<worker>/api/calendar.ics?token=…`
+(iOS fetches without cookies, so the credential lives in the URL — it is a
+feed-only token derived from `AGENT_TOKEN` by SHA-256, not the admin token
+itself; a leaked link reads the feed but grants no API write access).
+iOS then re-pulls the feed on its own schedule — 设置 → 日历 → 账户 →
+获取新数据 picks hourly/daily/manual — and updates events in place by UID.
+The feed mirrors the slotted `Scheduled Start`/`Scheduled End` blocks (3 days
+back, 14 ahead) written by the Feishu sync into the `calendar` row — a
+server-internal row excluded from `/api/widgets` reads, so the wider window
+is not anonymously readable. No separate calendar write or Feishu-calendar
+sync is needed. If `AGENT_TOKEN` rotates, the derived credential rotates too
+and the old feed URL 401s; subscribe again.
 
 ## Cost notes
 

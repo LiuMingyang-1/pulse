@@ -360,6 +360,36 @@ function toSchedule(records) {
   return { events };
 }
 
+// calendar feed contract: { events: [{id, title, start, end, priority}] } —
+// the multi-day sibling of toSchedule backing /api/calendar.ics: same Doing +
+// slotted filter, but Scheduled Start may fall anywhere in a window around
+// now (3 days back / 14 ahead, matching src/feishu-transform.ts toCalendar).
+// `id` carries the record_id so ICS UIDs stay stable across syncs.
+function toCalendar(records, now = new Date()) {
+  const lo = now.getTime() - 3 * 24 * 3600 * 1000;
+  const hi = now.getTime() + 14 * 24 * 3600 * 1000;
+  const events = records
+    .filter(({ row }) => first(row[3]) === 'Doing' && row[5] && row[6])
+    .map(({ row, record_id }) => ({
+      id: record_id,
+      title: row[0] ?? '(untitled)',
+      start: row[5],
+      end: row[6],
+      priority: first(row[2]) ?? 'P2',
+    }))
+    .filter((e) => {
+      const t = Date.parse(e.start);
+      return t >= lo && t <= hi;
+    })
+    .sort((a, b) => {
+      const sa = Date.parse(a.start);
+      const sb = Date.parse(b.start);
+      if (sa !== sb) return sa - sb;
+      return priorityRank(a.priority) - priorityRank(b.priority);
+    });
+  return { events };
+}
+
 // ── Push to Pulse ─────────────────────────────────────────────────────────
 async function push(id, title, data) {
   const res = await fetch(`${PULSE_URL}/api/widgets/${id}`, {
@@ -388,9 +418,10 @@ try {
   const todo = toTodo(records, localTodo, acked, failed, new Date().toISOString());
   const reminder = toReminder(records);
   const schedule = toSchedule(records);
-  console.log(`transformed → ${todo.pending_count} tasks (+${(todo.done_items ?? []).length} done), ${reminder.items.length} reminders, ${schedule.events.length} scheduled`);
+  const calendar = toCalendar(records);
+  console.log(`transformed → ${todo.pending_count} tasks (+${(todo.done_items ?? []).length} done), ${reminder.items.length} reminders, ${schedule.events.length} scheduled, ${calendar.events.length} cal`);
   if (DRY_RUN) {
-    console.log(JSON.stringify({ todo, reminder, schedule }, null, 2));
+    console.log(JSON.stringify({ todo, reminder, schedule, calendar }, null, 2));
   } else {
     // A failed todo read means pending_writes may still hold unsent writes —
     // pushing would overwrite the blob and flush the queue, so skip this card.
@@ -401,6 +432,8 @@ try {
     }
     console.log('pushed reminder:', JSON.stringify(await push('reminder', 'Reminder', reminder)));
     console.log('pushed schedule:', JSON.stringify(await push('schedule', '今日安排', schedule)));
+    // Hidden feed row for /api/calendar.ics — never rendered as a card.
+    console.log('pushed calendar:', JSON.stringify(await push('calendar', '日程订阅', calendar)));
   }
 } catch (err) {
   console.error('sync failed:', err.message ?? err);

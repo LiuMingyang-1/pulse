@@ -1,11 +1,13 @@
 import { Hono } from 'hono';
 import type { MiddlewareHandler } from 'hono';
 import { runFeishuSync, runFeishuSyncAfterPendingWrite } from './feishu';
+import { toIcs, type IcsEvent } from './ics';
 import {
   bearerMatches,
   checkLoginRateLimit,
   clearedSessionCookie,
   clientIp,
+  feedToken,
   loginBodyTooLarge,
   sessionCookie,
   splitTokenQuery,
@@ -32,6 +34,11 @@ interface WidgetRow {
 }
 
 const ALLOWED_SOURCES = new Set(['cron', 'hermes', 'alma', 'manual', 'agent', 'feishu-cron']);
+
+// Server-internal rows: never exposed by the anonymous widget reads — the
+// `calendar` feed row would otherwise widen the public surface from today's
+// schedule to a multi-day window. /api/calendar.ics reads D1 directly.
+const HIDDEN_WIDGETS = new Set(['calendar']);
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -131,11 +138,16 @@ app.get('/api/widgets', async (c) => {
   const { results } = await c.env.DB.prepare(
     'SELECT * FROM widgets ORDER BY id',
   ).all<WidgetRow>();
-  return c.json((results ?? []).map(rowToWidget));
+  return c.json(
+    (results ?? []).filter((r) => !HIDDEN_WIDGETS.has(r.id)).map(rowToWidget),
+  );
 });
 
 app.get('/api/widgets/:id', async (c) => {
   const id = c.req.param('id');
+  if (HIDDEN_WIDGETS.has(id)) {
+    return c.json({ error: 'not_found', id }, 404);
+  }
   const row = await c.env.DB.prepare('SELECT * FROM widgets WHERE id = ?')
     .bind(id)
     .first<WidgetRow>();
@@ -312,6 +324,54 @@ app.post('/api/todo/toggle', requireUser, async (c) => {
     updated_at: now,
     source: 'manual',
   });
+});
+
+// Parse a widget row's data blob, tolerating missing rows and bad JSON.
+async function widgetData(env: Env, id: string): Promise<unknown> {
+  const row = await env.DB.prepare('SELECT data FROM widgets WHERE id = ?')
+    .bind(id)
+    .first<{ data: string }>();
+  if (!row) return null;
+  try {
+    return JSON.parse(row.data);
+  } catch {
+    return null;
+  }
+}
+
+// GET /api/calendar.ics — iCalendar feed of the hidden `calendar` widget
+// (falling back to `schedule`). iOS Calendar fetches cookieless on its own
+// refresh cycle, so the subscription URL carries ?token=<feed credential> —
+// derived from AGENT_TOKEN (see session.ts feedToken), it reads the feed and
+// nothing else. A signed-in browser session or Bearer works too.
+app.get('/api/calendar.ics', async (c) => {
+  const authed =
+    userMatches(c.req.header('Authorization'), c.req.header('Cookie'), c.env.AGENT_TOKEN) ||
+    tokenMatches(c.req.query('token') ?? '', await feedToken(c.env.AGENT_TOKEN));
+  if (!authed) return c.json({ error: 'unauthorized' }, 401);
+
+  const data = (await widgetData(c.env, 'calendar')) ?? (await widgetData(c.env, 'schedule'));
+  const events = (data as { events?: IcsEvent[] } | null)?.events;
+  return new Response(toIcs(Array.isArray(events) ? events : []), {
+    headers: {
+      'Content-Type': 'text/calendar; charset=utf-8',
+      'Content-Disposition': 'inline; filename="pulse.ics"',
+      'Cache-Control': 'no-store',
+    },
+  });
+});
+
+// GET /api/calendar-link — the feed-credential URL for this deployment,
+// handed only to a signed-in session (the HttpOnly cookie hides it from page
+// JS). `subscribe` swaps to webcal:// so tapping it opens iOS Calendar's
+// subscribe sheet.
+app.get('/api/calendar-link', requireUser, async (c) => {
+  noStore(c);
+  const base = new URL(c.req.url);
+  const feed =
+    `${base.protocol}//${base.host}/api/calendar.ics` +
+    `?token=${encodeURIComponent((await feedToken(c.env.AGENT_TOKEN)) ?? '')}`;
+  return c.json({ feed, subscribe: feed.replace(/^https:/, 'webcal:') });
 });
 
 // POST /api/feishu/sync — run the Feishu bitable sync now (same as cron).

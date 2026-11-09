@@ -96,6 +96,21 @@ export function userMatches(
 }
 
 /**
+ * Feed-only credential for /api/calendar.ics?token= — derived from
+ * AGENT_TOKEN so there is no second secret to manage and it rotates with it.
+ * A leaked subscription URL reads the feed but grants no write or other API
+ * access (unlike handing out AGENT_TOKEN itself).
+ */
+export async function feedToken(expected: string | undefined): Promise<string | undefined> {
+  if (!expected) return undefined;
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(`pulse-calendar-feed:${expected}`),
+  );
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
+}
+
+/**
  * Separate `token` from the rest of the URL. `token` is null when the query
  * param is absent (empty string when it is present but blank). `location` is
  * a same-origin path safe to put in a Location header.

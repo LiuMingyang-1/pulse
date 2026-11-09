@@ -9,6 +9,9 @@ import Layout from '../layouts/Layout.astro';
       <button id="refresh" class="glass round" aria-label="刷新">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></svg>
       </button>
+      <button id="cal-sub" class="glass round" aria-label="订阅到日历" hidden>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18"/><path d="M8 3v4"/><path d="M16 3v4"/><path d="M12 13v5"/><path d="M9.5 15.5h5"/></svg>
+      </button>
       <nav class="glass pill">
         <span class="seg active">首页</span>
       </nav>
@@ -53,7 +56,8 @@ import Layout from '../layouts/Layout.astro';
     const cardsEl = document.getElementById('cards')!;
     const known = new Map(registry.map((d) => [d.id, d]));
     // Retired widgets: their old D1 rows may linger — never render them.
-    const RETIRED = new Set(['stocks']);
+    // 'calendar' is a hidden feed row for /api/calendar.ics, not a card.
+    const RETIRED = new Set(['stocks', 'calendar']);
 
     const defFor = (id: string, title?: string): WidgetDef =>
       known.get(id) ?? { ...generic, id, title: title ?? id };
@@ -127,6 +131,7 @@ import Layout from '../layouts/Layout.astro';
       document.getElementById('login-btn')!.hidden = loggedIn;
       document.getElementById('account-avatar')!.hidden = !loggedIn;
       document.getElementById('logout-btn')!.hidden = !loggedIn;
+      document.getElementById('cal-sub')!.hidden = !loggedIn;
     }
 
     function showLoginError(message: string) {
@@ -392,6 +397,19 @@ import Layout from '../layouts/Layout.astro';
       }
       await refresh();
     }
+
+    // Opens iOS Calendar's subscribe sheet via the token-bearing webcal URL
+    // the worker hands to signed-in sessions only (the cookie hides the token).
+    document.getElementById('cal-sub')!.addEventListener('click', async () => {
+      try {
+        const res = await fetch('/api/calendar-link', { credentials: 'same-origin' });
+        if (!res.ok) return;
+        const { subscribe } = await res.json();
+        if (typeof subscribe === 'string' && subscribe) location.href = subscribe;
+      } catch {
+        /* offline — nothing to subscribe to anyway */
+      }
+    });
 
     const btn = document.getElementById('refresh')!;
     btn.addEventListener('click', async () => {

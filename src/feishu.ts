@@ -2,7 +2,7 @@
 // box-hosted scripts/sync-feishu.mjs loop). Never logs tokens or secrets.
 import {
   FIELD_NAMES, adaptRecord, buildBatchUpdate, requeueWrites,
-  toReminder, toSchedule, toTodo,
+  toCalendar, toReminder, toSchedule, toTodo,
   type FeishuRecord, type PendingWrite, type TodoData,
 } from './feishu-transform';
 import {
@@ -276,6 +276,7 @@ async function runFeishuSyncBody(env: FeishuEnv): Promise<FeishuSyncResult> {
     const todo = toTodo(records, local, acked, failed, unsettled, nowIso);
     const reminder = toReminder(records);
     const schedule = toSchedule(records);
+    const calendar = toCalendar(records);
 
     let todoState: FeishuSyncResult['todo'];
     if (!todoRead.ok) {
@@ -298,6 +299,9 @@ async function runFeishuSyncBody(env: FeishuEnv): Promise<FeishuSyncResult> {
     }
     await upsert(env, 'reminder', 'Reminder', reminder, nowIso);
     await upsert(env, 'schedule', '今日安排', schedule, nowIso);
+    // Hidden feed row — never rendered as a card (see RETIRED in index.astro);
+    // /api/calendar.ics serves it to iOS calendar subscriptions.
+    await upsert(env, 'calendar', '日程订阅', calendar, nowIso);
 
     const result: FeishuSyncResult = {
       ok: true,

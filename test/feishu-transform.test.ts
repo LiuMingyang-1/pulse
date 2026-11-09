@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  adaptRecord, adaptValue, msToShanghaiIso, isTodayDate, toTodo, toReminder, toSchedule,
+  adaptRecord, adaptValue, msToShanghaiIso, isTodayDate, toTodo, toCalendar, toReminder, toSchedule,
   buildBatchUpdate, requeueWrites, type FeishuRecord,
 } from '../src/feishu-transform';
 
@@ -221,6 +221,35 @@ describe('toSchedule mixed offsets', () => {
       row('mid', 'P3', '2026-10-13T09:30:00.000+08:00'), // earlier instant, later string
     ];
     expect(toSchedule(recs, NOW).events.map((e) => e.title)).toEqual(['mid', 'p0', 'p2']);
+  });
+});
+
+describe('toCalendar', () => {
+  const slot = (id: string, title: string, startIso: string, extra: Record<string, unknown> = {}) =>
+    rec(id, {
+      Task: title, Status: 'Doing',
+      'Scheduled Start': ms(startIso), 'Scheduled End': ms(startIso) + 3600_000,
+      ...extra,
+    });
+  // NOW = 2026-10-13T04:00:00Z → default window [10-10T04:00Z, 10-27T04:00Z].
+  it('widens toSchedule to a ±window and carries record_id', () => {
+    const recs = [
+      slot('in-tom', 'tomorrow', '2026-10-14T01:00:00Z'),
+      slot('in-today', 'today', '2026-10-13T01:00:00Z'),
+      slot('in-past', 'past', '2026-10-11T01:00:00Z'),
+      slot('out-far', 'far', '2026-10-30T01:00:00Z'),
+      slot('out-old', 'old', '2026-10-01T01:00:00Z'),
+      slot('out-inbox', 'inbox', '2026-10-13T02:00:00Z', { Status: 'Inbox' }),
+      rec('out-noend', { Task: 'noend', Status: 'Doing', 'Scheduled Start': ms('2026-10-13T01:00:00Z') }),
+    ];
+    const ev = toCalendar(recs, NOW).events;
+    expect(ev.map((e) => e.title)).toEqual(['past', 'today', 'tomorrow']);
+    expect(ev.map((e) => e.id)).toEqual(['in-past', 'in-today', 'in-tom']);
+  });
+  it('honours a custom window', () => {
+    const recs = [slot('a', 'a', '2026-10-13T06:00:00Z'), slot('b', 'b', '2026-10-14T06:00:00Z')];
+    const ev = toCalendar(recs, NOW, { pastMs: 0, futureMs: 12 * 3600_000 }).events;
+    expect(ev.map((e) => e.title)).toEqual(['a']);
   });
 });
 
