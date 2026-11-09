@@ -18,6 +18,10 @@
 // The todo widget also round-trips user clicks: the browser POSTs a
 // `pending_writes` queue into todo.data, and each sync drains it by writing
 // Status back to Feishu via `lark-cli base +record-batch-update`.
+// TASKS_SCHEMA unset/legacy keeps that path. compat/v2 also sends the
+// completion checkbox (see docs/TASKS_V2.md). The worker cron is the path
+// that probes the field list; this script treats a matching column count as
+// the capability check and refuses to run v2 against a short row.
 //
 // So on your own machine you can just drop them in .dev.vars once and run
 // `node scripts/sync-feishu.mjs` without prefixing env vars every time.
@@ -62,12 +66,34 @@ if (!PULSE_TOKEN && !DRY_RUN) {
   process.exit(1);
 }
 
+// ── Tasks schema gate (keep aligned with src/tasks-schema.ts) ─────────────
+function tasksGate() {
+  const v = String(process.env.TASKS_SCHEMA ?? '').trim().toLowerCase();
+  if (v === 'v2' || v === 'on') return 'v2';
+  if (v === 'compat' || v === 'compatibility') return 'compat';
+  return 'legacy';
+}
+const GATE = tasksGate();
+const CORE_FIELDS = new Set(['Task', 'Due', 'Priority', 'Status', 'Type', 'Scheduled Start', 'Scheduled End']);
+function configuredName(raw, fallback) {
+  const name = String(raw ?? '').trim() || fallback;
+  return CORE_FIELDS.has(name) ? null : name;
+}
+const COMPLETED_FIELD = configuredName(process.env.FEISHU_FIELD_COMPLETED, '已完成');
+const PLAN_FIELD = configuredName(process.env.FEISHU_FIELD_PLAN_DATE, '计划日期');
+const EXTRA_FIELDS = GATE !== 'legacy' && COMPLETED_FIELD && PLAN_FIELD;
+if (GATE !== 'legacy' && !EXTRA_FIELDS) {
+  console.warn('TASKS_SCHEMA is set but a field name collides with a core column — staying on legacy reads');
+}
+
 // ── Fetch records via lark-cli ────────────────────────────────────────────
 // lark-cli base +record-list --app-token X --table-id Y --as user --format json
 const FIELD_IDS = [
   'Task', 'Due', 'Priority', 'Status', 'Type',
   'Scheduled Start', 'Scheduled End',
+  ...(EXTRA_FIELDS ? [COMPLETED_FIELD, PLAN_FIELD] : []),
 ];
+const READ_V2 = GATE === 'v2' && EXTRA_FIELDS;
 async function fetchRecords() {
   const { stdout } = await execFileP('lark-cli', [
     'base', '+record-list',
@@ -96,7 +122,21 @@ async function fetchRecords() {
       `probably swallowed silently — check the field names against the bitable.`,
     );
   }
-  return rows.map((row, i) => ({ row, record_id: ids[i] }));
+  return rows.map((row, i) => {
+    const rec = { row, record_id: ids[i] };
+    if (EXTRA_FIELDS) {
+      rec.completed = cellBool(row[7]);
+      rec.planDate = row[8] == null || row[8] === '' ? null : row[8];
+    }
+    return rec;
+  });
+}
+
+function cellBool(v) {
+  if (Array.isArray(v)) return v.length > 0 && cellBool(v[0]);
+  if (v === true || v === 1) return true;
+  if (typeof v === 'string' && v.trim().toLowerCase() === 'true') return true;
+  return false;
 }
 
 // ── Drain local todo writes back to Feishu ─────────────────────────────────
@@ -107,17 +147,32 @@ async function fetchRecords() {
 async function drainPendingWrites(writes) {
   const acked = new Set();
   const failed = new Set();
-  if (!writes.length) return { acked, failed };
+  // Checkbox half was not sent (legacy gate, column not requested). The
+  // Status half still goes out, but the queue entry is kept so a later
+  // compat/v2 run can finish the checkbox. Dropping it would lose the uncheck.
+  const unsentCheckbox = new Set();
+  if (!writes.length) return { acked, failed, unsentCheckbox };
   const update_records = {};
+  const writeCheckbox = EXTRA_FIELDS && (GATE === 'compat' || GATE === 'v2');
   for (const w of writes) {
-    if (w?.record_id && typeof w.status === 'string') {
-      update_records[w.record_id] = { Status: [w.status] };
+    if (!(w?.record_id && typeof w.status === 'string')) continue;
+    let completed = w.completed;
+    if (writeCheckbox && typeof completed !== 'boolean') completed = w.status === 'Done';
+    const fields = { Status: [w.status] };
+    // Send a checkbox that was already queued even if the gate has since
+    // returned to legacy, so an in-flight uncheck is not dropped. Do not
+    // invent one for a status-only write unless compat/v2 is on.
+    if (EXTRA_FIELDS && typeof completed === 'boolean' && (writeCheckbox || typeof w.completed === 'boolean')) {
+      fields[COMPLETED_FIELD] = completed;
+    } else if (typeof w.completed === 'boolean') {
+      unsentCheckbox.add(w.record_id);
     }
+    update_records[w.record_id] = fields;
   }
-  if (!Object.keys(update_records).length) return { acked, failed };
+  if (!Object.keys(update_records).length) return { acked, failed, unsentCheckbox };
   if (DRY_RUN) {
     console.log('would batch-update:', JSON.stringify({ update_records }));
-    return { acked, failed };
+    return { acked, failed, unsentCheckbox };
   }
   try {
     // --json takes the {update_records:{rid:{field:value}}} payload per the
@@ -136,7 +191,7 @@ async function drainPendingWrites(writes) {
     console.error(`pending_writes batch-update failed (${Object.keys(update_records).length} records):`, err.message ?? err);
     Object.keys(update_records).forEach((rid) => failed.add(rid));
   }
-  return { acked, failed };
+  return { acked, failed, unsentCheckbox };
 }
 
 // Read the current todo.data from D1 — carries the browser's pending_writes
@@ -187,8 +242,12 @@ function isTodayDate(isoString) {
   return localDay(d) === todayStr();
 }
 
+function rowDone(rec) {
+  return READ_V2 ? rec.completed === true : first(rec.row[3]) === 'Done';
+}
+
 function pending(records, type) {
-  return records.filter(({ row }) => first(row[3]) !== 'Done' && first(row[4]) === type);
+  return records.filter((rec) => !rowDone(rec) && first(rec.row[4]) === type);
 }
 
 // 'P0' → 0 … 'P3' → 3; missing/unparsable sinks to 9.
@@ -221,7 +280,7 @@ function byDueThenPriority(a, b) {
 // Feishu Status is truth; local flags only bridge the gap until the write lands.
 // `now` = this sync run's ISO timestamp — stamped as completed_at when a row
 // newly flips to Done (see below).
-function toTodo(records, local, acked, failed, now) {
+function toTodo(records, local, acked, failed, now, retain = new Set()) {
   const localById = new Map();
   for (const list of [local?.items, local?.done_items]) {
     if (Array.isArray(list)) for (const it of list) if (it?.id) localById.set(it.id, it);
@@ -272,7 +331,7 @@ function toTodo(records, local, acked, failed, now) {
   // local undo (done:false + queued/failed write) still lifts the row back
   // into items regardless of stamp — an undo never disappears.
   const mergedDone = records
-    .filter(({ row }) => first(row[3]) === 'Done' && first(row[4]) === 'Task')
+    .filter((rec) => rowDone(rec) && first(rec.row[4]) === 'Task')
     .map(({ row, record_id: id }) => {
       const prev = localById.get(id);
       const it = {
@@ -280,7 +339,7 @@ function toTodo(records, local, acked, failed, now) {
         title: row[0] ?? '(untitled)',
         due: row[1] ?? null,
         priority: first(row[2]) ?? 'P2',
-        status: 'Done',
+        status: READ_V2 ? first(row[3]) : 'Done',
         done: true,
       };
       if (prev?.completed_at) {
@@ -308,7 +367,7 @@ function toTodo(records, local, acked, failed, now) {
   // Keep only writes this round failed — acked ones are done, and a row that
   // no longer exists in Feishu simply drops out with its queue entry.
   const pending_writes = (Array.isArray(local?.pending_writes) ? local.pending_writes : [])
-    .filter((w) => w?.record_id && failed.has(w.record_id));
+    .filter((w) => w?.record_id && (failed.has(w.record_id) || retain.has(w.record_id)));
 
   return {
     pending_count: items.filter((it) => !it.done).length,
@@ -337,27 +396,73 @@ function toReminder(records) {
 // day arrives, so the card never mixes tomorrow's events into today's list.
 // Sorting / "now" highlighting happens client-side so the card stays correct
 // between 5-min syncs without re-pushing.
+function sortByStart(a, b) {
+  const sa = Date.parse(a.start);
+  const sb = Date.parse(b.start);
+  if (sa !== sb) return sa - sb;
+  return priorityRank(a.priority) - priorityRank(b.priority);
+}
+
+function overlapsToday(start, end) {
+  const s = Date.parse(start);
+  const e = Date.parse(end);
+  if (!Number.isFinite(s) || !Number.isFinite(e) || !(e > s)) return false;
+  const startMs = Date.parse(`${todayStr()}T00:00:00.000+08:00`);
+  return s < startMs + 86_400_000 && e > startMs;
+}
+
+function planKey(v) {
+  if (v == null || v === '') return null;
+  const s = String(Array.isArray(v) ? v[0] : v).trim();
+  if (!s) return null;
+  const dateOnly = s.match(/^(\d{4})[/-](\d{2})[/-](\d{2})$/);
+  if (dateOnly) return `${dateOnly[1]}-${dateOnly[2]}-${dateOnly[3]}`;
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return null;
+  return localDay(d);
+}
+
 function toSchedule(records) {
-  const events = records
-    .filter(
-      ({ row }) =>
-        first(row[3]) === 'Doing' && row[5] && row[6] && isTodayDate(row[5]),
-    )
-    .map(({ row }) => ({
-      title: row[0] ?? '(untitled)',
-      start: row[5],
-      end: row[6],
-      priority: first(row[2]) ?? 'P2',
-    }))
-    // Start ascending by timestamp; same instant → higher priority first
-    // (matches src/feishu-transform.ts).
-    .sort((a, b) => {
-      const sa = Date.parse(a.start);
-      const sb = Date.parse(b.start);
-      if (sa !== sb) return sa - sb;
-      return priorityRank(a.priority) - priorityRank(b.priority);
-    });
-  return { events };
+  if (!READ_V2) {
+    const events = records
+      .filter(
+        ({ row }) =>
+          first(row[3]) === 'Doing' && row[5] && row[6] && isTodayDate(row[5]),
+      )
+      .map(({ row }) => ({
+        title: row[0] ?? '(untitled)',
+        start: row[5],
+        end: row[6],
+        priority: first(row[2]) ?? 'P2',
+      }))
+      .sort(sortByStart);
+    return { events };
+  }
+  const today = todayStr();
+  const events = [];
+  const planned = [];
+  for (const rec of records) {
+    const { row } = rec;
+    const start = row[5] || null;
+    const end = row[6] || null;
+    const title = row[0] ?? '(untitled)';
+    const priority = first(row[2]) ?? 'P2';
+    const done = rec.completed === true;
+    if (!done && start && end && overlapsToday(start, end)) {
+      events.push({ id: rec.record_id, title, start, end, priority });
+      continue;
+    }
+    const day = planKey(rec.planDate);
+    const s = start ? Date.parse(start) : NaN;
+    const e = end ? Date.parse(end) : NaN;
+    const scheduled = Number.isFinite(s) && Number.isFinite(e) && e > s;
+    if (!done && day === today && !scheduled && first(row[4]) !== 'Reminder') {
+      planned.push({ id: rec.record_id, title, priority, plan_date: day });
+    }
+  }
+  events.sort(sortByStart);
+  planned.sort((a, b) => priorityRank(a.priority) - priorityRank(b.priority));
+  return { schema: 'v2', events, planned };
 }
 
 // calendar feed contract: { events: [{id, title, start, end, priority}] } —
@@ -411,12 +516,12 @@ async function push(id, title, data) {
 // ── Main ──────────────────────────────────────────────────────────────────
 try {
   const [records, todoRead] = await Promise.all([fetchRecords(), fetchTodoData()]);
-  console.log(`fetched ${records.length} rows from bitable`);
+  console.log(`fetched ${records.length} rows from bitable${GATE === 'legacy' ? '' : ` (tasks schema ${GATE})`}`);
   const localTodo = todoRead.ok ? todoRead.data : null;
   const writes = Array.isArray(localTodo?.pending_writes) ? localTodo.pending_writes : [];
-  const { acked, failed } = await drainPendingWrites(writes);
-  if (writes.length) console.log(`pending_writes: ${acked.size} acked, ${failed.size} failed`);
-  const todo = toTodo(records, localTodo, acked, failed, new Date().toISOString());
+  const { acked, failed, unsentCheckbox } = await drainPendingWrites(writes);
+  if (writes.length) console.log(`pending_writes: ${acked.size} acked, ${failed.size} failed, ${unsentCheckbox.size} checkbox-held`);
+  const todo = toTodo(records, localTodo, acked, failed, new Date().toISOString(), unsentCheckbox);
   const reminder = toReminder(records);
   const schedule = toSchedule(records);
   const calendar = toCalendar(records);

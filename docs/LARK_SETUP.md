@@ -176,3 +176,10 @@ Tapping a circle in the 飞书待办 card queues a `{record_id, status}` entry i
 `lark-cli base +record-batch-update` — no extra setup needed, same `LARK_AS`
 identity and tokens as the read path. Undoing a check-off writes the item's
 `prev_status` back the same way.
+
+The completion checkbox (默认名 `已完成`) and plan date (默认名 `计划日期`) are
+not part of this setup. Leave them off the table until
+[docs/TASKS_V2.md](TASKS_V2.md). With `TASKS_SCHEMA` unset, Pulse keeps the
+Status behavior above even if those columns already exist. Do not infer
+计划日期 from Doing or Scheduled, and do not clear Scheduled times when a task
+is marked done. Reminder's overdue / next-3-calendar-days window is unchanged.

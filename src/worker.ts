@@ -2,6 +2,8 @@ import { Hono } from 'hono';
 import type { MiddlewareHandler } from 'hono';
 import { runFeishuSync, runFeishuSyncAfterPendingWrite } from './feishu';
 import { toIcs, type IcsEvent } from './ics';
+import { parseTasksGate, tasksReadMode } from './tasks-schema';
+import { applyTodoToggle, type ToggleData } from './todo-toggle';
 import {
   bearerMatches,
   checkLoginRateLimit,
@@ -23,6 +25,10 @@ export interface Env {
   FEISHU_APP_SECRET?: string;
   FEISHU_BASE_TOKEN?: string;
   FEISHU_TABLE_ID?: string;
+  /** Unset keeps legacy Status behavior. See docs/TASKS_V2.md. */
+  TASKS_SCHEMA?: string;
+  FEISHU_FIELD_COMPLETED?: string;
+  FEISHU_FIELD_PLAN_DATE?: string;
 }
 
 interface WidgetRow {
@@ -212,23 +218,6 @@ app.post('/api/widgets/:id', requireBearer, async (c) => {
 // read-modify-write happens in a single invocation (the old GET→flip→POST-blob
 // flow raced with the sync's own push and with rapid clicks).
 // Body: { "id": "<record_id>", "done": true|false }. Returns the updated widget.
-interface TodoItem {
-  id?: string;
-  status?: string;
-  done?: boolean;
-  pending?: boolean;
-  prev_status?: string;
-  sync_failed?: boolean;
-  completed_at?: string;
-  [k: string]: unknown;
-}
-interface PendingWrite {
-  record_id?: string;
-  status?: string;
-  requested_at?: string;
-  [k: string]: unknown;
-}
-
 app.post('/api/todo/toggle', requireUser, async (c) => {
   let body: { id?: unknown; done?: unknown };
   try {
@@ -246,10 +235,12 @@ app.post('/api/todo/toggle', requireUser, async (c) => {
   if (!row) return c.json({ error: 'not_found', id: 'todo' }, 404);
 
   let data: {
-    items?: TodoItem[];
-    done_items?: TodoItem[];
-    pending_writes?: PendingWrite[];
+    items?: unknown;
+    done_items?: unknown;
+    pending_writes?: unknown;
     pending_count?: number;
+    tasks_schema?: { capability?: unknown };
+    write_audit?: unknown;
     [k: string]: unknown;
   };
   try {
@@ -258,47 +249,13 @@ app.post('/api/todo/toggle', requireUser, async (c) => {
     return c.json({ error: 'bad_widget_data' }, 500);
   }
 
-  const items: TodoItem[] = Array.isArray(data.items) ? data.items : [];
-  const doneItems: TodoItem[] = Array.isArray(data.done_items) ? data.done_items : [];
-  const it = [...items, ...doneItems].find((x) => x.id === body.id);
-  if (!it) return c.json({ error: 'item_not_found', id: body.id }, 404);
-
-  const nowDone = body.done;
-  it.done = nowDone;
-  it.pending = true; // until sync confirms the Feishu write
-  delete it.sync_failed;
-  // On completion stash the item's real Feishu status so undo restores it —
-  // 'Doing' is only the fallback when sync data predates the status field.
-  // completed_at is the server-side completion stamp sync uses to keep
-  // done_items today-only; it survives undo (history — the item being back
-  // in `items` already keeps it out of the sunken section).
-  if (nowDone && !it.prev_status) it.prev_status = it.status ?? 'Doing';
-  if (nowDone) it.completed_at = new Date().toISOString();
-
-  const writes: PendingWrite[] = Array.isArray(data.pending_writes) ? data.pending_writes : [];
-  // A toggle on an already-queued record replaces the queued target — keeps
-  // rapid check→undo→check from stacking contradictory writes.
-  const queued = writes.findIndex((x) => x?.record_id === body.id);
-  const entry: PendingWrite = {
-    record_id: body.id,
-    // Undo writes prev_status back to Feishu; 'Inbox' only when an item was
-    // completed before prev_status existed — rare, so a mild surprise is fine.
-    status: nowDone ? 'Done' : (it.prev_status ?? 'Inbox'),
-    requested_at: new Date().toISOString(),
-  };
-  if (queued >= 0) writes.splice(queued, 1, entry);
-  else writes.push(entry);
-  data.pending_writes = writes;
-
-  // Undo on a Feishu-acked item lives in done_items — lift it back into items.
-  if (!nowDone && !items.includes(it)) {
-    items.push(it);
-    data.done_items = doneItems.filter((x) => x !== it);
-  }
-  // Done toggles stay in `items` (locally sunken); sync moves them to
-  // done_items once Feishu confirms.
-  data.items = items;
-  data.pending_count = items.filter((x) => !x.done).length;
+  const gate = parseTasksGate(c.env.TASKS_SCHEMA);
+  const capability = data.tasks_schema?.capability === 'v2' ? 'v2' as const : 'unknown' as const;
+  const applied = applyTodoToggle(data as ToggleData, body.id, body.done, new Date().toISOString(), {
+    writeCompleted: (gate === 'compat' || gate === 'v2') && capability === 'v2',
+    readMode: tasksReadMode(gate, capability),
+  });
+  if (!applied.ok) return c.json({ error: applied.error, id: body.id }, 404);
 
   const now = new Date().toISOString();
   await c.env.DB.prepare(

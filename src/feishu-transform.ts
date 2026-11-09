@@ -5,6 +5,16 @@
 //   row = [Task, Due, Priority, Status, Type, Scheduled Start, Scheduled End]
 // adaptRecord() converts bitable OpenAPI records into that shape.
 
+import {
+  intervalOverlapsShanghaiDay,
+  isValidSchedule,
+  parseCheckbox,
+  planDateKey,
+  shanghaiDayKey,
+  type TasksReadMode,
+  type TasksSchemaStamp,
+} from './tasks-schema';
+
 export const FIELD_NAMES = [
   'Task', 'Due', 'Priority', 'Status', 'Type',
   'Scheduled Start', 'Scheduled End',
@@ -13,7 +23,23 @@ const DATE_FIELDS = new Set(['Due', 'Scheduled Start', 'Scheduled End']);
 const SELECT_FIELDS = new Set(['Priority', 'Status', 'Type']);
 
 export type Cell = string | string[] | null;
-export interface FeishuRecord { row: Cell[]; record_id: string }
+export interface AdaptFields {
+  /** When set, the read asked for this column. Absence on a row is false, not "unknown". */
+  completedField?: string;
+  /** When set, the read asked for this column. Absence stays null — never inferred. */
+  planDateField?: string;
+}
+export interface FeishuRecord {
+  row: Cell[];
+  record_id: string;
+  /** Present only when `completedField` was requested. */
+  completed?: boolean;
+  /** Present only when `planDateField` was requested. null = empty. */
+  planDate?: string | null;
+}
+export interface TasksView {
+  read: TasksReadMode;
+}
 
 export interface TodoItem {
   id: string;
@@ -26,14 +52,25 @@ export interface TodoItem {
   prev_status?: string;
   sync_failed?: boolean;
   completed_at?: string;
+  /** Shanghai calendar day of 计划日期. Only set on v2 reads. null = empty. */
+  plan_date?: string | null;
 }
 export interface PendingWrite {
   record_id?: string;
   status?: string;
-  // Set once a single-record read confirms the primary row holds `status`.
+  /**
+   * Checkbox target. Absent on legacy queue entries. `false` is a real
+   * "not done" once the write was made under compat/v2 — it is not the same
+   * as a missing field.
+   */
+  completed?: boolean;
+  schema?: string;
+  upgraded_from?: string;
+  // Set once a single-record read confirms the primary row holds the target.
   // Landed writes are never re-sent — they stay queued only until the
   // lagging records/search index shows the same value (or the primary
-  // diverges, meaning someone else edited the row).
+  // diverges, meaning someone else edited the row). A v2 target is landed
+  // only when Status AND the checkbox match.
   landed?: boolean;
   [k: string]: unknown;
 }
@@ -42,6 +79,8 @@ export interface TodoData {
   items: TodoItem[];
   done_items?: TodoItem[];
   pending_writes?: PendingWrite[];
+  tasks_schema?: TasksSchemaStamp;
+  write_audit?: unknown[];
 }
 
 // ── Field adapter ─────────────────────────────────────────────────────────
@@ -89,9 +128,22 @@ export function adaptValue(name: string, v: unknown): Cell {
   return textOf(v);
 }
 
-export function adaptRecord(rec: { record_id: string; fields?: Record<string, unknown> }): FeishuRecord {
+function adaptDateCell(v: unknown): string | null {
+  if (v == null || v === '') return null;
+  const ms = typeof v === 'number' ? v : typeof v === 'string' && /^\d+$/.test(v) ? Number(v) : NaN;
+  if (Number.isFinite(ms)) return msToShanghaiIso(ms);
+  return typeof v === 'string' ? v : null;
+}
+
+export function adaptRecord(
+  rec: { record_id: string; fields?: Record<string, unknown> },
+  fields?: AdaptFields,
+): FeishuRecord {
   const f = rec.fields ?? {};
-  return { record_id: rec.record_id, row: FIELD_NAMES.map((n) => adaptValue(n, f[n])) };
+  const out: FeishuRecord = { record_id: rec.record_id, row: FIELD_NAMES.map((n) => adaptValue(n, f[n])) };
+  if (fields?.completedField) out.completed = parseCheckbox(f[fields.completedField]);
+  if (fields?.planDateField) out.planDate = adaptDateCell(f[fields.planDateField]);
+  return out;
 }
 
 // ── Transforms (verbatim logic from sync-feishu.mjs) ──────────────────────
@@ -145,8 +197,11 @@ export function toTodo(
   failed: Set<string>,
   unsettled: Set<string>,
   nowIso: string,
+  view: TasksView = { read: 'legacy' },
 ): TodoData {
+  const v2 = view.read === 'v2';
   const now = new Date(nowIso);
+  const remoteDone = (rec: FeishuRecord) => (v2 ? rec.completed === true : first(rec.row[3]) === 'Done');
   const localById = new Map<string, TodoItem>();
   for (const list of [local?.items, local?.done_items]) {
     if (Array.isArray(list)) for (const it of list) if (it?.id) localById.set(it.id, it);
@@ -154,8 +209,10 @@ export function toTodo(
   const localWrites = Array.isArray(local?.pending_writes) ? local!.pending_writes! : [];
   const queuedIds = new Set(localWrites.map((w) => w?.record_id).filter(Boolean) as string[]);
 
-  const items: TodoItem[] = pending(records, 'Task')
-    .map(({ row, record_id: id }) => {
+  const items: TodoItem[] = records
+    .filter((rec) => !remoteDone(rec) && first(rec.row[4]) === 'Task')
+    .map((rec) => {
+      const { row, record_id: id } = rec;
       const prev = localById.get(id);
       const it: TodoItem = {
         id,
@@ -164,6 +221,7 @@ export function toTodo(
         priority: first(row[2]) ?? 'P2',
         status: first(row[3]),
       };
+      if (v2) it.plan_date = planDateKey(rec.planDate);
       // Locally-marked done while Feishu still shows it unfinished: keep the
       // sunken state as long as the write is unsettled (in flight, held for
       // the lagging index, or just failed). Only failed writes get the red
@@ -183,17 +241,21 @@ export function toTodo(
     .sort(byDueThenPriority);
 
   const mergedDone: TodoItem[] = records
-    .filter(({ row }) => first(row[3]) === 'Done' && first(row[4]) === 'Task')
-    .map(({ row, record_id: id }) => {
+    .filter((rec) => remoteDone(rec) && first(rec.row[4]) === 'Task')
+    .map((rec) => {
+      const { row, record_id: id } = rec;
       const prev = localById.get(id);
       const it: TodoItem = {
         id,
         title: str(row[0]) ?? '(untitled)',
         due: str(row[1]) ?? null,
         priority: first(row[2]) ?? 'P2',
-        status: 'Done',
+        // v2 keeps the real Status. Forcing 'Done' here would make a later
+        // undo restore Done and bounce the checkbox back on.
+        status: v2 ? first(row[3]) : 'Done',
         done: true,
       };
+      if (v2) it.plan_date = planDateKey(rec.planDate);
       if (prev?.completed_at) it.completed_at = prev.completed_at;
       else if (prev && prev.done !== true) it.completed_at = nowIso;
       if (prev?.prev_status) it.prev_status = prev.prev_status;
@@ -217,11 +279,14 @@ export function toTodo(
     (w) => w?.record_id && (failed.has(w.record_id) || unsettled.has(w.record_id)),
   );
 
+  const write_audit = Array.isArray(local?.write_audit) ? local.write_audit.slice(-20) : [];
+
   return {
     pending_count: items.filter((it) => !it.done).length,
     items,
     ...(sunken.length ? { done_items: sunken } : {}),
     ...(pending_writes.length ? { pending_writes } : {}),
+    ...(write_audit.length ? { write_audit } : {}),
   };
 }
 
@@ -245,25 +310,79 @@ function byStartThenPriority(
   return priorityRank(a.priority) - priorityRank(b.priority);
 }
 
-export function toSchedule(records: FeishuRecord[], now: Date = new Date()) {
-  const events = records
-    .filter(({ row }) => first(row[3]) === 'Doing' && row[5] && row[6] && isTodayDate(row[5], now))
-    .map(({ row }) => ({
-      title: str(row[0]) ?? '(untitled)',
-      start: str(row[5]) as string,
-      end: str(row[6]) as string,
-      priority: first(row[2]) ?? 'P2',
-    }))
-    .sort(byStartThenPriority);
-  return { events };
+export interface ScheduleEvent {
+  title: string;
+  start: string;
+  end: string;
+  priority: string;
+  id?: string;
+}
+export interface PlannedTask {
+  id: string;
+  title: string;
+  priority: string;
+  plan_date: string;
+}
+
+/**
+ * Legacy: Status=Doing, both Scheduled times, Scheduled Start falls on today.
+ * v2: union of (1) a valid interval that overlaps today, any Status except a
+ * completed checkbox, plan date ignored, and (2) 计划日期=today with no valid
+ * interval and not completed. Doing is not "in progress" and is not a
+ * substitute for either side. End<=Start and one-sided times are left as they
+ * are. A valid interval on another day is scheduled, so it is not "未排期".
+ */
+export function toSchedule(
+  records: FeishuRecord[],
+  now: Date = new Date(),
+  view: TasksView = { read: 'legacy' },
+) {
+  if (view.read !== 'v2') {
+    const events = records
+      .filter(({ row }) => first(row[3]) === 'Doing' && row[5] && row[6] && isTodayDate(row[5], now))
+      .map(({ row }) => ({
+        title: str(row[0]) ?? '(untitled)',
+        start: str(row[5]) as string,
+        end: str(row[6]) as string,
+        priority: first(row[2]) ?? 'P2',
+      }))
+      .sort(byStartThenPriority);
+    return { events };
+  }
+
+  const today = shanghaiDayKey(now);
+  const events: ScheduleEvent[] = [];
+  const planned: PlannedTask[] = [];
+  for (const rec of records) {
+    const { row } = rec;
+    const start = str(row[5]);
+    const end = str(row[6]);
+    const title = str(row[0]) ?? '(untitled)';
+    const priority = first(row[2]) ?? 'P2';
+    const done = rec.completed === true;
+    if (!done && start && end && intervalOverlapsShanghaiDay(start, end, now)) {
+      events.push({ id: rec.record_id, title, start, end, priority });
+      continue;
+    }
+    const day = planDateKey(rec.planDate);
+    const scheduledElsewhere = isValidSchedule(start, end);
+    if (!done && day === today && !scheduledElsewhere && first(row[4]) !== 'Reminder') {
+      planned.push({ id: rec.record_id, title, priority, plan_date: day });
+    }
+  }
+  events.sort(byStartThenPriority);
+  planned.sort((a, b) => priorityRank(a.priority) - priorityRank(b.priority) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return { schema: 'v2' as const, events, planned };
 }
 
 // calendar feed contract: { events: [{id, title, start, end, priority}] } —
 // the multi-day sibling of toSchedule, backing the /api/calendar.ics
 // subscription. Unlike toSchedule it takes ANY slotted record (both Scheduled
-// times present, any Status/Type — Done blocks stay as history), with the
-// Scheduled Start inside a window around `now`. `id` carries the record_id
-// so ICS UIDs stay stable across syncs.
+// times present, any Status/Type — Done blocks stay as history and completion
+// does not clear them), with the Scheduled Start inside a window around `now`.
+// Plan date and the completion checkbox do not add or remove feed events.
+// `id` carries the record_id so ICS UIDs stay `${record_id}@pulse`.
+// End<=Start is left in the row; toIcs drops it. Nothing here writes a calendar.
 export const CALENDAR_PAST_MS = 3 * 24 * 3600 * 1000;
 export const CALENDAR_FUTURE_MS = 14 * 24 * 3600 * 1000;
 
@@ -296,12 +415,21 @@ export function toCalendar(
 
 // pending_writes → batch_update payload. Single select takes a plain string.
 // Later entries for the same record win (toggle endpoint already dedupes).
-export function buildBatchUpdate(writes: PendingWrite[]) {
-  const byId = new Map<string, string>();
+export function buildBatchUpdate(
+  writes: PendingWrite[],
+  opts?: { completedField?: string | null },
+) {
+  const byId = new Map<string, PendingWrite>();
   for (const w of writes) {
-    if (w?.record_id && typeof w.status === 'string') byId.set(w.record_id, w.status);
+    if (w?.record_id && typeof w.status === 'string') byId.set(w.record_id, w);
   }
-  return [...byId].map(([record_id, status]) => ({ record_id, fields: { Status: status } }));
+  return [...byId].map(([record_id, w]) => {
+    const fields: Record<string, string | boolean> = { Status: w.status as string };
+    if (opts?.completedField && typeof w.completed === 'boolean') {
+      fields[opts.completedField] = w.completed;
+    }
+    return { record_id, fields };
+  });
 }
 
 // The wide records/search read is eventually consistent — right after a
@@ -322,12 +450,24 @@ export function requeueWrites(
     for (const it of list) {
       if (!it?.id || !unsettled.has(it.id)) continue;
       const w = prev.get(it.id);
-      out.push({
+      const rebuilt: PendingWrite = {
         ...(w ?? {}),
         record_id: it.id,
         status: it.done ? 'Done' : (it.prev_status ?? 'Inbox'),
-        requested_at: w?.requested_at ?? new Date().toISOString(),
-      });
+        requested_at: typeof w?.requested_at === 'string' ? w.requested_at : new Date().toISOString(),
+      };
+      if (typeof w?.completed === 'boolean' || w?.schema === 'v2') {
+        rebuilt.completed = it.done === true;
+        rebuilt.schema = 'v2';
+      }
+      if (
+        w &&
+        (w.status !== rebuilt.status ||
+          (typeof rebuilt.completed === 'boolean' && w.completed !== rebuilt.completed))
+      ) {
+        delete rebuilt.landed;
+      }
+      out.push(rebuilt);
       prev.delete(it.id);
     }
   }
