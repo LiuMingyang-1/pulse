@@ -6,12 +6,14 @@ import Layout from '../layouts/Layout.astro';
   <div class="shell">
     <!-- Hark-style floating top bar: round button · pill · session -->
     <header class="topbar">
-      <button id="refresh" class="glass round" aria-label="刷新">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></svg>
-      </button>
-      <button id="cal-sub" class="glass round" aria-label="订阅到日历" hidden>
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18"/><path d="M8 3v4"/><path d="M16 3v4"/><path d="M12 13v5"/><path d="M9.5 15.5h5"/></svg>
-      </button>
+      <div class="bar-left">
+        <button id="refresh" class="glass round" aria-label="刷新">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></svg>
+        </button>
+        <button id="cal-sub" class="glass round" aria-label="订阅到日历" hidden>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18"/><path d="M8 3v4"/><path d="M16 3v4"/><path d="M12 13v5"/><path d="M9.5 15.5h5"/></svg>
+        </button>
+      </div>
       <nav class="glass pill">
         <span class="seg active">首页</span>
       </nav>

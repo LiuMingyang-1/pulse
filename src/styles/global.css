@@ -139,6 +139,17 @@
 }
 .seg.active { background: var(--ink); color: #fff; }
 
+/* Left cluster mirrors .account on the right: refresh + (signed-in only)
+   calendar subscribe. #cal-sub's `hidden` still wins — [hidden] is
+   !important in the base layer. */
+.bar-left {
+  display: flex;
+  align-items: center;
+  justify-self: start;
+  gap: 8px;
+  flex: none;
+  min-width: 0;
+}
 .account {
   display: flex;
   align-items: center;
