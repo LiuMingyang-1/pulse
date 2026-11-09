@@ -361,15 +361,16 @@ function toSchedule(records) {
 }
 
 // calendar feed contract: { events: [{id, title, start, end, priority}] } —
-// the multi-day sibling of toSchedule backing /api/calendar.ics: same Doing +
-// slotted filter, but Scheduled Start may fall anywhere in a window around
-// now (3 days back / 14 ahead, matching src/feishu-transform.ts toCalendar).
-// `id` carries the record_id so ICS UIDs stay stable across syncs.
+// the multi-day sibling of toSchedule backing /api/calendar.ics. Unlike
+// toSchedule it takes ANY slotted record (any Status — Done stays as history)
+// with Scheduled Start in a window around now (3 days back / 14 ahead,
+// matching src/feishu-transform.ts toCalendar). `id` = record_id keeps ICS
+// UIDs stable.
 function toCalendar(records, now = new Date()) {
   const lo = now.getTime() - 3 * 24 * 3600 * 1000;
   const hi = now.getTime() + 14 * 24 * 3600 * 1000;
   const events = records
-    .filter(({ row }) => first(row[3]) === 'Doing' && row[5] && row[6])
+    .filter(({ row }) => row[5] && row[6])
     .map(({ row, record_id }) => ({
       id: record_id,
       title: row[0] ?? '(untitled)',

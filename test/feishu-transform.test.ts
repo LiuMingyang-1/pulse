@@ -232,19 +232,22 @@ describe('toCalendar', () => {
       ...extra,
     });
   // NOW = 2026-10-13T04:00:00Z → default window [10-10T04:00Z, 10-27T04:00Z].
-  it('widens toSchedule to a ±window and carries record_id', () => {
+  it('any Status + slotted in a ±window, carrying record_id', () => {
     const recs = [
       slot('in-tom', 'tomorrow', '2026-10-14T01:00:00Z'),
       slot('in-today', 'today', '2026-10-13T01:00:00Z'),
       slot('in-past', 'past', '2026-10-11T01:00:00Z'),
+      slot('in-inbox', 'inbox-scheduled', '2026-10-13T02:00:00Z', { Status: 'Inbox' }),
+      slot('in-done', 'done-history', '2026-10-12T01:00:00Z', { Status: 'Done' }),
       slot('out-far', 'far', '2026-10-30T01:00:00Z'),
       slot('out-old', 'old', '2026-10-01T01:00:00Z'),
-      slot('out-inbox', 'inbox', '2026-10-13T02:00:00Z', { Status: 'Inbox' }),
       rec('out-noend', { Task: 'noend', Status: 'Doing', 'Scheduled Start': ms('2026-10-13T01:00:00Z') }),
     ];
     const ev = toCalendar(recs, NOW).events;
-    expect(ev.map((e) => e.title)).toEqual(['past', 'today', 'tomorrow']);
-    expect(ev.map((e) => e.id)).toEqual(['in-past', 'in-today', 'in-tom']);
+    expect(ev.map((e) => e.title)).toEqual(
+      ['past', 'done-history', 'today', 'inbox-scheduled', 'tomorrow'],
+    );
+    expect(ev.map((e) => e.id)).toEqual(['in-past', 'in-done', 'in-today', 'in-inbox', 'in-tom']);
   });
   it('honours a custom window', () => {
     const recs = [slot('a', 'a', '2026-10-13T06:00:00Z'), slot('b', 'b', '2026-10-14T06:00:00Z')];

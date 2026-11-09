@@ -260,10 +260,10 @@ export function toSchedule(records: FeishuRecord[], now: Date = new Date()) {
 
 // calendar feed contract: { events: [{id, title, start, end, priority}] } —
 // the multi-day sibling of toSchedule, backing the /api/calendar.ics
-// subscription. Same Doing + slotted filter (any Type — talks/interviews
-// belong on the calendar too), but the Scheduled Start may fall anywhere in
-// a window around `now` instead of today only. `id` carries the record_id so
-// ICS UIDs stay stable across syncs.
+// subscription. Unlike toSchedule it takes ANY slotted record (both Scheduled
+// times present, any Status/Type — Done blocks stay as history), with the
+// Scheduled Start inside a window around `now`. `id` carries the record_id
+// so ICS UIDs stay stable across syncs.
 export const CALENDAR_PAST_MS = 3 * 24 * 3600 * 1000;
 export const CALENDAR_FUTURE_MS = 14 * 24 * 3600 * 1000;
 
@@ -278,7 +278,7 @@ export function toCalendar(
   const lo = now.getTime() - window.pastMs;
   const hi = now.getTime() + window.futureMs;
   const events = records
-    .filter(({ row }) => first(row[3]) === 'Doing' && row[5] && row[6])
+    .filter(({ row }) => row[5] && row[6])
     .map(({ row, record_id }) => ({
       id: record_id,
       title: str(row[0]) ?? '(untitled)',
