@@ -10,3 +10,4 @@ seed.sql
 logs/
 docs-internal/
 scripts/com.pulse.sync-feishu.plist
+__pycache__/

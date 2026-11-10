@@ -7,6 +7,8 @@ export interface IcsEvent {
   title: string;
   start: string; // ISO 8601
   end: string;   // ISO 8601
+  location?: string;
+  description?: string;
 }
 
 const PRODID = '-//pulse//calendar feed//EN';
@@ -81,15 +83,11 @@ export function toIcs(events: IcsEvent[], calName = 'Pulse 日程', now = new Da
     if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) continue;
     const start = icsDateUtc(e.start)!;
     const end = icsDateUtc(e.end)!;
-    lines.push(
-      'BEGIN:VEVENT',
-      `UID:${icsUid(e)}`,
-      `DTSTAMP:${stamp}`,
-      `DTSTART:${start}`,
-      `DTEND:${end}`,
-      `SUMMARY:${icsEscape(String(e.title ?? ''))}`,
-      'END:VEVENT',
-    );
+    lines.push('BEGIN:VEVENT', `UID:${icsUid(e)}`, `DTSTAMP:${stamp}`, `DTSTART:${start}`, `DTEND:${end}`);
+    lines.push(`SUMMARY:${icsEscape(String(e.title ?? ''))}`);
+    if (e.location) lines.push(`LOCATION:${icsEscape(String(e.location))}`);
+    if (e.description) lines.push(`DESCRIPTION:${icsEscape(String(e.description))}`);
+    lines.push('END:VEVENT');
   }
   lines.push('END:VCALENDAR');
   return lines.flatMap(foldLine).join('\r\n') + '\r\n';

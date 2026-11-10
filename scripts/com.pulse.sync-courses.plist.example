@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent that runs sync-courses.mjs once a day on a Mac.
+
+  The XJTU timetable rarely changes mid-semester — a daily refresh is plenty.
+  fetch needs a live session (eHall for undergrads, GMIS for graduates); when
+  it expires the script pushes the cached snapshot and logs a reminder to
+  re-run the mode's `login` step.
+
+  Install:
+    cp scripts/com.pulse.sync-courses.plist.example ~/Library/LaunchAgents/com.pulse.sync-courses.plist
+    # edit the copied file: fix NODE path, repo path, PULSE_URL, PULSE_TOKEN,
+    # XJTU_MODE (set to "gmis" for graduate/研究生 accounts — auto mode picks
+    #   ehall whenever uvx is on PATH, which is wrong for grad NetIDs),
+    # XJTU_SEMESTER (only if it differs from the auto-derived <year>-fall/-spring),
+    # XJTU_CMD (only for a pip-installed tool — with uv, PATH just needs uvx)
+    launchctl load ~/Library/LaunchAgents/com.pulse.sync-courses.plist
+
+  Find your node path with: which node
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.pulse.sync-courses</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/PATH/TO/node</string>
+		<string>/PATH/TO/pulse/scripts/sync-courses.mjs</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/PATH/TO/node/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<key>PULSE_URL</key>
+		<string>https://pulse.YOUR-SUBDOMAIN.workers.dev</string>
+		<key>PULSE_TOKEN</key>
+		<string>REPLACE_WITH_AGENT_TOKEN</string>
+	</dict>
+	<key>StartInterval</key>
+	<integer>86400</integer>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/tmp/pulse-sync-courses.log</string>
+	<key>StandardErrorPath</key>
+	<string>/tmp/pulse-sync-courses.log</string>
+</dict>
+</plist>

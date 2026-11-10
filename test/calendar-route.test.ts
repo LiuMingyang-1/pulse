@@ -106,6 +106,37 @@ describe('GET /api/calendar.ics', () => {
     expect(body).not.toContain('recFeed1');
   });
 
+  it('merges the courses row into the same feed', async () => {
+    const COURSES_ROW = JSON.stringify({
+      events: [
+        {
+          id: 'abc123@xjtu',
+          title: '信号与系统',
+          start: '2026-11-10T14:00:00.000+08:00',
+          end: '2026-11-10T15:50:00.000+08:00',
+          location: '创新港校区 A-1001',
+        },
+      ],
+    });
+    const res = await get(
+      envWith({ calendar: CAL_ROW, courses: COURSES_ROW }),
+      `${url}?token=${await feedToken('secret')}`,
+    );
+    const body = await res.text();
+    expect(body).toContain('UID:recFeed1@pulse');
+    expect(body).toContain('UID:abc123@xjtu@pulse');
+    expect(body).toContain('SUMMARY:信号与系统');
+    expect(body).toContain('LOCATION:创新港校区 A-1001');
+  });
+
+  it('serves the courses feed even without the calendar row', async () => {
+    const COURSES_ROW = JSON.stringify({
+      events: [{ title: '课', start: '2026-11-10T14:00:00+08:00', end: '2026-11-10T15:00:00+08:00' }],
+    });
+    const res = await get(envWith({ courses: COURSES_ROW }), `${url}?token=${await feedToken('secret')}`);
+    expect(await res.text()).toContain('SUMMARY:课');
+  });
+
   it('no rows still returns a subscribable (empty) calendar', async () => {
     const res = await get(envWith({}), `${url}?token=${await feedToken('secret')}`);
     expect(res.status).toBe(200);
@@ -136,15 +167,17 @@ describe('GET /api/calendar-link', () => {
 });
 
 describe('hidden widget rows', () => {
-  it('calendar is excluded from GET /api/widgets and 404s on :id', async () => {
-    const env = envWith({ calendar: CAL_ROW, schedule: SCHED_ROW });
+  it('calendar and courses are excluded from GET /api/widgets and 404 on :id', async () => {
+    const env = envWith({ calendar: CAL_ROW, courses: CAL_ROW, schedule: SCHED_ROW });
 
     const list = await get(env, 'https://pulse.test/api/widgets');
     expect(list.status).toBe(200);
     const widgets = await list.json();
     expect(widgets.map((w: { id: string }) => w.id)).toEqual(['schedule']);
 
-    const single = await get(env, 'https://pulse.test/api/widgets/calendar');
-    expect(single.status).toBe(404);
+    for (const id of ['calendar', 'courses']) {
+      const single = await get(env, `https://pulse.test/api/widgets/${id}`);
+      expect(single.status).toBe(404);
+    }
   });
 });

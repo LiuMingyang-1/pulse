@@ -75,6 +75,13 @@ calendar.data = { "events": [{ "id"?: string,   // Feishu record_id → stable I
                 (Done keeps its times). UID is record_id@pulse.
                 Plan date and the completion checkbox do not change this feed.
                 Served by /api/calendar.ics. No Apple or Feishu calendar write.
+courses.data  = { "events": [{ "id"?: string,   // upstream UID (xjtu-gmis / xjtu_calendar)
+                              "title": string,
+                              "start": ISO8601, "end": ISO8601,
+                              "location"?: string, "description"?: string }] }
+                second hidden feed row — the XJTU timetable push from
+                scripts/sync-courses.mjs (whole semester + exams); merged
+                into the same /api/calendar.ics subscription
 reminder.data = { "items": [{ "title": string, "due": ISO8601 }] }
                 card shows the next-3-days window
 todo.data     = { "pending_count": number,    // unfinished only
@@ -307,9 +314,92 @@ iOS then re-pulls the feed on its own schedule — 设置 → 日历 → 账户 
 The feed mirrors the slotted `Scheduled Start`/`Scheduled End` blocks (3 days
 back, 14 ahead) written by the Feishu sync into the `calendar` row — a
 server-internal row excluded from `/api/widgets` reads, so the wider window
-is not anonymously readable. No separate calendar write or Feishu-calendar
-sync is needed. If `AGENT_TOKEN` rotates, the derived credential rotates too
-and the old feed URL 401s; subscribe again.
+is not anonymously readable. A second hidden row, `courses`, is merged into
+the same feed when present (XJTU timetable, see below). No separate calendar
+write or Feishu-calendar sync is needed. If `AGENT_TOKEN` rotates, the
+derived credential rotates too and the old feed URL 401s; subscribe again.
+
+## XJTU timetable (optional)
+
+Adds your 西安交通大学 timetable into the same `/api/calendar.ics`
+subscription — classroom in `LOCATION`, teacher/week info in `DESCRIPTION`.
+Two sources, picked by `XJTU_MODE` (`auto`/`ehall`/`gmis`, default `auto` =
+ehall when `uvx` is on PATH else gmis):
+
+- **研究生 / graduate → `gmis`** (`scripts/xjtu-gmis.py`, stdlib-only):
+  GMIS `pyxx/pygl/xskbcx` page → parse → expand. This is the mode you want if
+  eHall CAS greets you with `Required Access Policy not matched` — the eHall
+  「我的课表」app is undergraduate-only and refuses graduate NetIDs.
+- **本科 / undergrad → `ehall`**: eHall「我的课表」via
+  [xjtu-timetable-calendar](https://github.com/XLJFZ/xjtu-timetable-calendar),
+  which also covers exams.
+
+Both expand teaching-weeks→dates and the winter/summer schedule switch using
+the same config dir `~/.xjtu-timetable-calendar/` (`semesters/<key>.json` +
+`schedules/schedule.json`), so configure once regardless of mode.
+
+### Graduate (GMIS) setup
+
+One-time, in a foreground terminal:
+
+```sh
+# browser pops up at GMIS OAuth — finish SSO/MFA yourself; state is saved
+# under ~/.xjtu-gmis/session/
+uv run --with playwright python scripts/xjtu-gmis.py login
+# school calendar + class-period schedule (shared with the ehall tool —
+# if you already configured it there, skip):
+$EDITOR ~/.xjtu-timetable-calendar/semesters/2026-fall.json
+$EDITOR ~/.xjtu-timetable-calendar/schedules/schedule.json
+python3 scripts/xjtu-gmis.py doctor --semester 2026-fall   # exit 0 = ready
+python3 scripts/xjtu-gmis.py pull   --semester 2026-fall   # optional: preview events JSON
+```
+
+Then push into the feed:
+
+```sh
+PULSE_URL=https://<your-worker>.workers.dev PULSE_TOKEN=<AGENT_TOKEN> \
+XJTU_MODE=gmis node scripts/sync-courses.mjs
+```
+
+`--no-fetch` re-pushes from the last cached GMIS snapshot; `--dry-run` prints
+events without POSTing. Session expiry → re-run the `login` line. The daily
+launchd job (below) works for both modes — set `XJTU_MODE=gmis` in its
+EnvironmentVariables for a graduate account.
+
+### Undergrad (eHall) setup
+
+With uv nothing gets installed — `uvx` runs the tool in a cached ephemeral
+env (first run resolves it, later runs are instant):
+
+```sh
+alias xjtu-calendar='uvx --from "xjtu-timetable-calendar[http,browser]" xjtu-calendar'
+xjtu-calendar login            # browser pops up — finish SSO yourself
+$EDITOR ~/.xjtu-timetable-calendar/semesters/2026-fall.json   # first_week_monday etc.
+mkdir -p ~/.xjtu-timetable-calendar/schedules
+# copy the tool's schedule.example.json (real XJTU 作息, incl. 10-01 winter
+# switch) — or `xjtu-calendar schedule --url <官方作息页> --apply`
+xjtu-calendar doctor --semester 2026-fall   # exit 0 = ready
+
+PULSE_URL=https://<your-worker>.workers.dev PULSE_TOKEN=<AGENT_TOKEN> \
+node scripts/sync-courses.mjs           # fetch + export + push
+node scripts/sync-courses.mjs --no-fetch   # re-push from the cached snapshot
+node scripts/sync-courses.mjs --dry-run    # print events, no POST
+```
+
+(No uv? `pip install "xjtu-timetable-calendar[http,browser]"` and set
+`XJTU_CMD='python3 -m xjtu_calendar'` for the sync script.)
+
+When the saved eHall session expires (fetch exits 3), the script still pushes
+the last cached snapshot and logs a reminder — re-run
+`xjtu-calendar login --force` to refresh it.
+
+### Shared notes
+
+The semester key defaults to `<year>-fall` (Aug–Jan) / `<year>-spring`
+(Feb–Jul); override with `XJTU_SEMESTER` to match the filename under
+`semesters/`. Events carry stable UIDs, so 调课 changes update in place on the
+next iOS fetch. To run it daily, copy
+`scripts/com.pulse.sync-courses.plist.example` like the Feishu plist above.
 
 ## Cost notes
 

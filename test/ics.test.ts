@@ -72,6 +72,24 @@ describe('toIcs', () => {
     expect(out).toContain('SUMMARY:晨会\\, 对齐');
     expect(out.match(/BEGIN:VEVENT/g)).toHaveLength(1);
   });
+  it('emits LOCATION and DESCRIPTION when present, escaping them', () => {
+    const out = toIcs(
+      [
+        {
+          id: 'c1',
+          title: '信号与系统',
+          start: '2026-11-10T14:00:00.000+08:00',
+          end: '2026-11-10T15:50:00.000+08:00',
+          location: '创新港校区 A-1001',
+          description: '教师: 张三; 第 1-16 周',
+        },
+      ],
+      'Pulse 日程',
+      new Date('2026-11-10T00:00:00Z'),
+    );
+    expect(out).toContain('LOCATION:创新港校区 A-1001');
+    expect(out).toContain('DESCRIPTION:教师: 张三\\; 第 1-16 周');
+  });
   it('empty events still produce a subscribable calendar', () => {
     const out = toIcs([]);
     expect(out).toContain('BEGIN:VCALENDAR');

@@ -39,12 +39,13 @@ interface WidgetRow {
   source: string | null;
 }
 
-const ALLOWED_SOURCES = new Set(['cron', 'hermes', 'alma', 'manual', 'agent', 'feishu-cron']);
+const ALLOWED_SOURCES = new Set(['cron', 'hermes', 'alma', 'manual', 'agent', 'feishu-cron', 'xjtu-cron']);
 
 // Server-internal rows: never exposed by the anonymous widget reads — the
 // `calendar` feed row would otherwise widen the public surface from today's
-// schedule to a multi-day window. /api/calendar.ics reads D1 directly.
-const HIDDEN_WIDGETS = new Set(['calendar']);
+// schedule to a multi-day window; `courses` holds the whole semester.
+// /api/calendar.ics reads D1 directly.
+const HIDDEN_WIDGETS = new Set(['calendar', 'courses']);
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -309,7 +310,15 @@ app.get('/api/calendar.ics', async (c) => {
 
   const data = (await widgetData(c.env, 'calendar')) ?? (await widgetData(c.env, 'schedule'));
   const events = (data as { events?: IcsEvent[] } | null)?.events;
-  return new Response(toIcs(Array.isArray(events) ? events : []), {
+  // The `courses` row (XJTU timetable push) merges into the same feed — one
+  // subscription URL covers both Feishu slots and class meetings.
+  const courseData = await widgetData(c.env, 'courses');
+  const courseEvents = (courseData as { events?: IcsEvent[] } | null)?.events;
+  const merged = [
+    ...(Array.isArray(events) ? events : []),
+    ...(Array.isArray(courseEvents) ? courseEvents : []),
+  ];
+  return new Response(toIcs(merged), {
     headers: {
       'Content-Type': 'text/calendar; charset=utf-8',
       'Content-Disposition': 'inline; filename="pulse.ics"',

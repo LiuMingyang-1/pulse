@@ -58,8 +58,8 @@ import Layout from '../layouts/Layout.astro';
     const cardsEl = document.getElementById('cards')!;
     const known = new Map(registry.map((d) => [d.id, d]));
     // Retired widgets: their old D1 rows may linger — never render them.
-    // 'calendar' is a hidden feed row for /api/calendar.ics, not a card.
-    const RETIRED = new Set(['stocks', 'calendar']);
+    // 'calendar'/'courses' are hidden feed rows for /api/calendar.ics, not cards.
+    const RETIRED = new Set(['stocks', 'calendar', 'courses']);
 
     const defFor = (id: string, title?: string): WidgetDef =>
       known.get(id) ?? { ...generic, id, title: title ?? id };
