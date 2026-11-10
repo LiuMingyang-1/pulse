@@ -304,8 +304,8 @@ import Layout from '../layouts/Layout.astro';
 
     // Completion note: checking an item opens a skippable prompt (Enter =
     // 记下, Esc/backdrop/跳过 = close with no note). The note rides the same
-    // toggle POST so it lands in pending_writes atomically with the done
-    // write — no second call for a sync to split. Undo never prompts.
+    // toggle POST so it lands on the task row atomically with the done
+    // write — no second call to split them. Undo never prompts.
     const noteDialog = document.getElementById('note-dialog') as HTMLDialogElement;
     const noteInput = document.getElementById('note-input') as HTMLInputElement;
     document.getElementById('note-skip')!.addEventListener('click', () => noteDialog.close());
@@ -339,8 +339,8 @@ import Layout from '../layouts/Layout.astro';
         return;
       }
       // Track the last requested state per item — rapid clicks on the same
-      // circle must see each other's intent (check→undo→check collapses to a
-      // single final write via the server's queue replace).
+      // circle must see each other's intent (check→undo→check serializes
+      // through toggleQueue so the final write wins).
       const nowDone = !(lastToggle.get(id) ?? el.closest('.w-todo')?.classList.contains('is-done'));
       lastToggle.set(id, nowDone);
       todoMutationGen++;
@@ -366,7 +366,7 @@ import Layout from '../layouts/Layout.astro';
         // The intent never landed — drop it so a retry click recomputes from
         // the DOM instead of inverting off stale memory.
         if (lastToggle.get(id) === nowDone) lastToggle.delete(id);
-        return; // keep polling view; next sync/poll reconciles
+        return; // keep polling view; the next poll repaints from D1
       }
       paint(defFor('todo'), await res.json());
       // The DOM now reflects this toggle — the next click can read it again.

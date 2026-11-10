@@ -235,17 +235,21 @@ app.post('/api/widgets/:id', requireBearer, async (c) => {
 // split from the completion. Returns the recomputed todo widget.
 // Body: { "id": "<task_id>", "done": true|false, "note"?: string }.
 app.post('/api/todo/toggle', requireUser, async (c) => {
-  let body: { id?: unknown; done?: unknown; note?: unknown };
+  let body: { id?: unknown; done?: unknown; note?: unknown } | null;
   try {
     body = await c.req.json();
   } catch {
     return c.json({ error: 'invalid_json' }, 400);
   }
-  if (typeof body.id !== 'string' || typeof body.done !== 'boolean') {
+  if (!body || typeof body !== 'object' || typeof body.id !== 'string' || typeof body.done !== 'boolean') {
     return c.json({ error: 'missing_field', field: 'id|done' }, 400);
   }
 
-  const note = typeof body.note === 'string' ? body.note.trim().slice(0, 500) : null;
+  // A note only makes sense on completion; undo ignores it. Array.from keeps
+  // the 500-char cap from splitting a surrogate pair.
+  const note = body.done && typeof body.note === 'string'
+    ? Array.from(body.note.trim()).slice(0, 500).join('')
+    : null;
   const now = new Date();
   const applied = await toggleTask(c.env.DB, body.id, body.done, note || null, now.toISOString());
   if (!applied.ok) return c.json({ error: applied.error, id: body.id }, 404);
@@ -351,7 +355,8 @@ app.patch('/api/tasks/:id', requireUser, async (c) => {
   const { patch, error } = parseTaskPatch(body, true);
   if (error) return c.json({ error }, 400);
   const r = await updateTask(c.env.DB, c.req.param('id'), patch, new Date().toISOString());
-  return r.ok ? c.json(r.row) : c.json({ error: r.error }, 404);
+  if (!r.ok) return c.json({ error: r.error }, r.error === 'conflict' ? 409 : 404);
+  return c.json(r.row);
 });
 
 app.delete('/api/tasks/:id', requireUser, async (c) => {

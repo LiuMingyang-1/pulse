@@ -38,13 +38,28 @@ const TASK_COLS: (keyof TaskRow)[] = [
   'calendar_event_id', 'completed_at', 'created_at', 'updated_at',
 ];
 
-export function fakeDb(init: { tasks?: TaskRow[]; widgets?: FakeWidgetRow[] } = {}) {
+export function fakeDb(
+  init: { tasks?: TaskRow[]; widgets?: FakeWidgetRow[] } = {},
+  hooks: { beforeWrite?: (sql: string, tasks: TaskRow[]) => void } = {},
+) {
   const tasks = [...(init.tasks ?? [])];
   const widgets = [...(init.widgets ?? [])];
 
+  // Real SQLite enforces NOT NULL — the fake must too, or a bad write path
+  // sails through tests and dies as a 500 in prod.
+  const REQUIRED = ['title', 'type', 'status', 'priority'] as const;
+  function checkConstraints(t: TaskRow) {
+    for (const c of REQUIRED) {
+      if (t[c] === null || t[c] === undefined) {
+        throw new Error(`NOT NULL constraint failed: tasks.${c}`);
+      }
+    }
+  }
+
   function runSelect(sql: string, binds: unknown[]): unknown[] {
     if (/^SELECT \* FROM tasks ORDER BY/.test(sql)) {
-      return [...tasks].sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
+      // Matches ORDER BY datetime(created_at) — instant order, not lexical.
+      return [...tasks].sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
     }
     if (/^SELECT \* FROM tasks WHERE id/.test(sql)) {
       return tasks.filter((t) => t.id === binds[0]);
@@ -69,6 +84,11 @@ export function fakeDb(init: { tasks?: TaskRow[]; widgets?: FakeWidgetRow[] } = 
   // Mirror toggleTask's CASE-WHEN semantics: binds are
   // [done, done, done, stamp, (note, note)?, updated_at, id].
   function runToggle(binds: unknown[]): number {
+    // Bind-order fidelity: status and completed_at conditions reuse the same
+    // done flag, and the optional note binds twice — catch a swap.
+    if (binds[1] !== binds[0] || binds[2] !== binds[0]) {
+      throw new Error('fakeDb: toggle flag binds diverged');
+    }
     const id = binds[binds.length - 1];
     const t = tasks.find((x) => x.id === id);
     if (!t) return 0;
@@ -77,25 +97,34 @@ export function fakeDb(init: { tasks?: TaskRow[]; widgets?: FakeWidgetRow[] } = 
     if (t.done === 0 && done) t.completed_at = binds[3] as string;
     t.done = done ? 1 : 0;
     t.updated_at = binds[binds.length - 2] as string;
+    checkConstraints(t);
     return 1;
   }
 
+  // UPDATE tasks SET title=? … updated_at=? WHERE id = ? AND updated_at = ?
+  // — binds are [15 cols, id, expected_updated_at]; the optimistic-concurrency
+  // clause must apply, or the retry path goes untested.
   function runUpdate(binds: unknown[]): number {
-    const id = binds[binds.length - 1];
+    const id = binds[binds.length - 2];
+    const expected = binds[binds.length - 1];
     const t = tasks.find((x) => x.id === id);
-    if (!t) return 0;
-    // UPDATE tasks SET title=?, type=?, ... updated_at=? — 15 columns in order.
+    if (!t || t.updated_at !== expected) return 0;
     const cols = TASK_COLS.filter((c) => c !== 'id' && c !== 'created_at');
     cols.forEach((c, i) => {
       (t as Record<string, unknown>)[c] = binds[i];
     });
+    checkConstraints(t);
     return 1;
   }
 
   function runWrite(sql: string, binds: unknown[]): number {
+    // Concurrency injection point — mutate rows here to simulate a write
+    // landing between the caller's SELECT and this statement.
+    hooks.beforeWrite?.(sql, tasks);
     if (/^UPDATE tasks SET\s+done/.test(sql)) {
       const changed = runToggle(binds);
       if (changed && /notes = CASE/.test(sql)) {
+        if (binds[4] !== binds[5]) throw new Error('fakeDb: note binds diverged');
         const t = tasks.find((x) => x.id === binds[binds.length - 1]);
         const note = binds[4] as string;
         t!.notes = t!.notes === '' ? note : `${t!.notes}\n${note}`;
@@ -106,6 +135,7 @@ export function fakeDb(init: { tasks?: TaskRow[]; widgets?: FakeWidgetRow[] } = 
     if (/^INSERT INTO tasks/.test(sql)) {
       const row = {} as Record<string, unknown>;
       TASK_COLS.forEach((c, i) => (row[c] = binds[i]));
+      checkConstraints(row as unknown as TaskRow);
       tasks.push(row as unknown as TaskRow);
       return 1;
     }

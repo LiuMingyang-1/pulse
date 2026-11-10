@@ -17,7 +17,7 @@ computed from task rows at read time, so a write is visible on the next poll.
 | `scheduled_start` / `scheduled_end` | ISO 8601 interval. A valid interval (`end > start`) overlapping the Shanghai day puts the task on today's timeline and on the ICS feed. |
 | `notes` | Free text. Completion reflections append one line each. |
 | `completed_at` | Stamped automatically when `done` flips 0→1; kept on undo. Today's completions sink to the todo card's done section. |
-| `calendar_event_id`, `project`, `tags`, `created_at`, `updated_at` | Bookkeeping; `tags`/`project` are plain strings. |
+| `calendar_event_id`, `project`, `tags`, `created_at`, `updated_at` | Bookkeeping; `tags`/`project` are plain strings — rows migrated from Feishu may hold a JSON-array string in `tags`. |
 
 Day boundaries are always Asia/Shanghai.
 

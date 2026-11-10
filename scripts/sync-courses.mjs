@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // sync-courses.mjs — XJTU eHall timetable → Pulse `courses` widget row, which
-// /api/calendar.ics merges into the same iPhone subscription as the Feishu
-// `calendar` row. Run on a host with a logged-in xjtu-timetable-calendar
+// /api/calendar.ics merges into the same iPhone subscription as the task
+// events computed from the tasks table. Run on a host with a logged-in
+// xjtu-timetable-calendar
 // session (your Mac), not in the Worker — eHall SSO needs a one-time manual
 // browser login and the session file lives under XJTU_CALENDAR_HOME.
 //
@@ -15,7 +16,7 @@
 //   node scripts/sync-courses.mjs --no-fetch       # export cached snapshot + push
 //   node scripts/sync-courses.mjs --dry-run        # print events, don't POST
 //
-// Env (process.env → .dev.vars → defaults), like sync-feishu.mjs:
+// Env (process.env → .dev.vars → defaults):
 //   PULSE_URL          (default http://localhost:8787)
 //   PULSE_TOKEN        (required unless --dry-run — same as AGENT_TOKEN)
 //   PULSE_SOURCE       (optional — `source` tag on the row; default 'xjtu-cron')

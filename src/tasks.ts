@@ -38,7 +38,16 @@ export function planDateKey(value: string | null | undefined): string | null {
   const s = value.trim();
   if (!s) return null;
   const dateOnly = s.match(/^(\d{4})[/-](\d{2})[/-](\d{2})$/);
-  if (dateOnly) return `${dateOnly[1]}-${dateOnly[2]}-${dateOnly[3]}`;
+  if (dateOnly) {
+    // Reject out-of-range days — '2026-13-45' must not pass the regex check.
+    const d = new Date(`${dateOnly[1]}-${dateOnly[2]}-${dateOnly[3]}T00:00:00Z`);
+    if (
+      d.getUTCFullYear() !== +dateOnly[1] ||
+      d.getUTCMonth() !== +dateOnly[2] - 1 ||
+      d.getUTCDate() !== +dateOnly[3]
+    ) return null;
+    return `${dateOnly[1]}-${dateOnly[2]}-${dateOnly[3]}`;
+  }
   const d = new Date(s);
   if (Number.isNaN(d.getTime())) return null;
   return SHANGHAI_DAY.format(d);
@@ -133,7 +142,7 @@ export function toTodo(tasks: TaskRow[], now: Date = new Date()): TodoData {
     .sort(byDueThenPriority);
   const done_items = tasks
     .filter((t) => t.done && t.type === 'Task' && isTodayDate(t.completed_at, now))
-    .sort((a, b) => (a.completed_at ?? '') < (b.completed_at ?? '') ? -1 : 1)
+    .sort((a, b) => (dueMs(a.completed_at) ?? 0) - (dueMs(b.completed_at) ?? 0))
     .slice(-DONE_LIMIT)
     .map((t) => ({ ...toItem(t), done: true, completed_at: t.completed_at! }));
   return {
@@ -147,7 +156,7 @@ export function toReminder(tasks: TaskRow[]) {
   const items = tasks
     .filter((t) => !t.done && t.type === 'Reminder' && t.due)
     .map((t) => ({ title: t.title, due: t.due as string }))
-    .sort((a, b) => (a.due < b.due ? -1 : 1));
+    .sort((a, b) => (dueMs(a.due) ?? 0) - (dueMs(b.due) ?? 0));
   return { items };
 }
 
@@ -205,7 +214,7 @@ export function toCalendar(
   const lo = now.getTime() - window.pastMs;
   const hi = now.getTime() + window.futureMs;
   const events = tasks
-    .filter((t) => t.scheduled_start && t.scheduled_end)
+    .filter((t) => isValidSchedule(t.scheduled_start, t.scheduled_end))
     .map((t) => ({
       id: t.id,
       title: t.title,
@@ -213,17 +222,18 @@ export function toCalendar(
       end: t.scheduled_end as string,
       priority: t.priority || 'P2',
     }))
-    .filter((e) => {
-      const t = Date.parse(e.start);
-      return t >= lo && t <= hi;
-    })
+    // Overlap, not start-in-window — an event that began before the window
+    // but is still running belongs on the feed.
+    .filter((e) => Date.parse(e.start) <= hi && Date.parse(e.end) >= lo)
     .sort(byStartThenPriority);
   return { events };
 }
 
 // ── D1 access ─────────────────────────────────────────────────────────────
 export async function listTasks(db: D1Database): Promise<TaskRow[]> {
-  const { results } = await db.prepare('SELECT * FROM tasks ORDER BY created_at').all<TaskRow>();
+  // datetime() normalizes the mixed Z/+08:00 formats to UTC — a plain lexical
+  // ORDER BY would sort the same instant differently by suffix.
+  const { results } = await db.prepare('SELECT * FROM tasks ORDER BY datetime(created_at)').all<TaskRow>();
   return results ?? [];
 }
 
@@ -288,7 +298,8 @@ export async function todoWidget(db: D1Database, now: Date = new Date()): Promis
 /**
  * One todo check/undo. done=1 stamps completed_at (only on a real 0→1 flip)
  * and sets status='Done'; done=0 restores 'Inbox' only when the label is
- * 'Done' — an agent-set label like Waiting survives an undo. A non-empty
+ * 'Done' — a label set outside the completion flow (e.g. Waiting on a task
+ * never checked) is left alone by an undo. A non-empty
  * note appends one line to `notes` in the same UPDATE, so the reflection can
  * never be split from the completion it describes.
  */
@@ -330,11 +341,18 @@ export interface ParsedPatch {
   error?: string;
 }
 
+// An instant must carry an explicit offset — '2026-11-10T09:00' without one is
+// ambiguous (V8 reads it as local time, Workers as UTC) and Date.parse also
+// accepts junk like "1". Bare dates stay legal only for plan_date.
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/;
+
 function parseInstant(name: string, v: unknown, patch: Record<string, string | number | null>): string | null {
   if (v === null) { patch[name] = null; return null; }
   if (typeof v !== 'string' || !v.trim()) return `${name} must be an ISO string or null`;
   const s = v.trim();
-  if (!Number.isFinite(Date.parse(s))) return `${name} is not a parseable date`;
+  if (!ISO_INSTANT.test(s) || !Number.isFinite(Date.parse(s))) {
+    return `${name} must be an ISO 8601 instant with an explicit offset (…Z or ±hh:mm)`;
+  }
   patch[name] = s;
   return null;
 }
@@ -345,6 +363,10 @@ function parseInstant(name: string, v: unknown, patch: Record<string, string | n
  * due/scheduled_* must be parseable instants; completed_at is settable so a
  * backfill can say "done yesterday" — a 0→1 flip stamps it automatically.
  */
+// NOT NULL columns: null would survive validation only to die as a 500 on the
+// constraint — reject it up front so the client gets a 400.
+const REQUIRED_COLS = new Set(['title', 'type', 'status', 'priority']);
+
 export function parseTaskPatch(body: unknown, partial: boolean): ParsedPatch {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     return { patch: {}, error: 'body must be a JSON object' };
@@ -366,6 +388,7 @@ export function parseTaskPatch(body: unknown, partial: boolean): ParsedPatch {
       const err = parseInstant(key, v, patch);
       if (err) return { patch: {}, error: err };
     } else if (v === null) {
+      if (REQUIRED_COLS.has(key)) return { patch: {}, error: `${key} cannot be null` };
       patch[key] = key === 'notes' ? '' : null;
     } else if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
       patch[key] = String(v);
@@ -373,7 +396,10 @@ export function parseTaskPatch(body: unknown, partial: boolean): ParsedPatch {
       return { patch: {}, error: `${key} must be a scalar` };
     }
   }
-  if (!partial && (typeof patch.title !== 'string' || patch.title === '')) {
+  if ('title' in patch && (typeof patch.title !== 'string' || patch.title.trim() === '')) {
+    return { patch: {}, error: 'title must be a non-empty string' };
+  }
+  if (!partial && !('title' in patch)) {
     return { patch: {}, error: 'title is required' };
   }
   return { patch };
@@ -401,7 +427,10 @@ export async function createTask(
     project: (patch.project as string | null) ?? null,
     tags: (patch.tags as string | null) ?? null,
     calendar_event_id: (patch.calendar_event_id as string | null) ?? null,
-    completed_at: (patch.completed_at as string | null) ?? (done ? nowIso : null),
+    // An explicit completed_at (even null) wins; auto-stamp only when absent.
+    completed_at: 'completed_at' in patch
+      ? (patch.completed_at as string | null)
+      : (done ? nowIso : null),
     created_at: nowIso,
     updated_at: nowIso,
   };
@@ -423,30 +452,36 @@ export async function updateTask(
   id: string,
   patch: Record<string, string | number | null>,
   nowIso: string,
-): Promise<{ ok: true; row: TaskRow } | { ok: false; error: 'item_not_found' }> {
-  const cur = await db.prepare('SELECT * FROM tasks WHERE id = ?').bind(id).first<TaskRow>();
-  if (!cur) return { ok: false, error: 'item_not_found' };
-  const next = { ...cur };
-  for (const [k, v] of Object.entries(patch)) {
-    (next as Record<string, unknown>)[k] = v;
+): Promise<{ ok: true; row: TaskRow } | { ok: false; error: 'item_not_found' | 'conflict' }> {
+  // Optimistic concurrency: the UPDATE only lands when updated_at is still
+  // what the SELECT saw, so a toggle-with-note (or another PATCH) landing in
+  // between is never silently overwritten. Retry once on a lost race.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const cur = await db.prepare('SELECT * FROM tasks WHERE id = ?').bind(id).first<TaskRow>();
+    if (!cur) return { ok: false, error: 'item_not_found' };
+    const next = { ...cur };
+    for (const [k, v] of Object.entries(patch)) {
+      (next as Record<string, unknown>)[k] = v;
+    }
+    // A 0→1 flip stamps completed_at unless the caller stamped it explicitly;
+    // undo keeps the old stamp — same semantics as the toggle route.
+    if (patch.done === 1 && cur.done === 0 && patch.completed_at === undefined) next.completed_at = nowIso;
+    if (patch.done === 1 && cur.status !== 'Done' && patch.status === undefined) next.status = 'Done';
+    if (patch.done === 0 && cur.status === 'Done' && patch.status === undefined) next.status = 'Inbox';
+    next.updated_at = nowIso;
+    const r = await db.prepare(
+      `UPDATE tasks SET title=?, type=?, status=?, done=?, due=?, priority=?, plan_date=?,
+        scheduled_start=?, scheduled_end=?, notes=?, project=?, tags=?, calendar_event_id=?,
+        completed_at=?, updated_at=?
+       WHERE id = ? AND updated_at = ?`,
+    ).bind(
+      next.title, next.type, next.status, next.done, next.due, next.priority, next.plan_date,
+      next.scheduled_start, next.scheduled_end, next.notes, next.project, next.tags,
+      next.calendar_event_id, next.completed_at, next.updated_at, id, cur.updated_at,
+    ).run();
+    if ((r.meta?.changes ?? 0) > 0) return { ok: true, row: next };
   }
-  // A 0→1 flip stamps completed_at unless the caller stamped it explicitly;
-  // undo keeps the old stamp — same semantics as the toggle route.
-  if (patch.done === 1 && cur.done === 0 && patch.completed_at === undefined) next.completed_at = nowIso;
-  if (patch.done === 1 && cur.status !== 'Done' && patch.status === undefined) next.status = 'Done';
-  if (patch.done === 0 && cur.status === 'Done' && patch.status === undefined) next.status = 'Inbox';
-  next.updated_at = nowIso;
-  await db.prepare(
-    `UPDATE tasks SET title=?, type=?, status=?, done=?, due=?, priority=?, plan_date=?,
-      scheduled_start=?, scheduled_end=?, notes=?, project=?, tags=?, calendar_event_id=?,
-      completed_at=?, updated_at=?
-     WHERE id = ?`,
-  ).bind(
-    next.title, next.type, next.status, next.done, next.due, next.priority, next.plan_date,
-    next.scheduled_start, next.scheduled_end, next.notes, next.project, next.tags,
-    next.calendar_event_id, next.completed_at, next.updated_at, id,
-  ).run();
-  return { ok: true, row: next };
+  return { ok: false, error: 'conflict' };
 }
 
 export async function deleteTask(db: D1Database, id: string): Promise<boolean> {

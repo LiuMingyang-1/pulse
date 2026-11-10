@@ -42,7 +42,7 @@ async function fetchAllRecords() {
   throw new Error('too many pages');
 }
 
-// ── Cell coercion (mirrors src/feishu-transform.ts adaptValue semantics) ──
+// ── Cell coercion (Feishu cell values → D1 column types) ──────────────────
 const textOf = (v) => {
   if (v == null || v === '') return null;
   if (typeof v === 'string') return v;
@@ -112,7 +112,7 @@ for (const rec of items) {
     updated_at: now,
   };
   console.log(
-    `INSERT INTO tasks (id, title, type, status, done, due, priority, plan_date,` +
+    `INSERT OR IGNORE INTO tasks (id, title, type, status, done, due, priority, plan_date,` +
     ` scheduled_start, scheduled_end, notes, project, tags, calendar_event_id,` +
     ` completed_at, created_at, updated_at) VALUES (` +
     `${lit(cols.id)}, ${lit(cols.title)}, ${lit(cols.type)}, ${lit(cols.status)}, ` +

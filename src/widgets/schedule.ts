@@ -9,14 +9,12 @@ const hm = (iso: string | null | undefined): string => {
 
 // data = { events: [{ title, start (ISO), end (ISO), priority? }],
 //          planned?: [{ id, title, priority, plan_date }] }
-// `events` is the timed timeline. Legacy syncs only fill that list (Doing +
-// start-today). After the v2 cutover it is every valid Scheduled interval that
+// `events` is the timed timeline — every valid Scheduled interval that
 // overlaps today, including ones that cross midnight, whether or not 计划日期
 // is set. `planned` is the other half: 计划日期 is today and there is no valid
 // time block. The two lists are a union — a row is never required to have both.
-// Rows are sorted at push time; rendering marks past / live / upcoming so the
-// card stays correct between syncs. Old payloads have no `planned` and render
-// exactly as before.
+// Rows are sorted server-side; rendering marks past / live / upcoming.
+// Old payloads have no `planned` and render exactly as before.
 export const schedule: WidgetDef = {
   id: 'schedule',
   title: '今日安排',

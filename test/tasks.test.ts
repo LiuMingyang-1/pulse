@@ -20,8 +20,11 @@ const ctx = () => ({ waitUntil() {}, passThroughOnException() {} });
 const cookie = { Cookie: `${SESSION_COOKIE}=${encodeSession('secret')}` };
 const bearer = { Authorization: 'Bearer secret' };
 
-function envWith(init: Parameters<typeof fakeDb>[0] = {}) {
-  const fake = fakeDb(init);
+function envWith(
+  init: Parameters<typeof fakeDb>[0] = {},
+  hooks?: Parameters<typeof fakeDb>[1],
+) {
+  const fake = fakeDb(init, hooks);
   return {
     ...fake,
     env: {
@@ -55,6 +58,9 @@ describe('date helpers', () => {
     expect(planDateKey('')).toBeNull();
     expect(planDateKey('garbage')).toBeNull();
     expect(planDateKey(null)).toBeNull();
+    // Regex shape alone isn't enough — out-of-range days are rejected.
+    expect(planDateKey('2026-13-45')).toBeNull();
+    expect(planDateKey('2026-02-31')).toBeNull();
   });
 
   it('isValidSchedule needs both ends and end > start', () => {
@@ -150,9 +156,13 @@ describe('toReminder / toCalendar', () => {
       makeTask({ id: 'in', title: 'In', scheduled_start: '2026-11-10T14:00:00+08:00', scheduled_end: '2026-11-10T15:00:00+08:00' }),
       makeTask({ id: 'far', title: 'Far', scheduled_start: '2027-11-10T14:00:00+08:00', scheduled_end: '2027-11-10T15:00:00+08:00' }),
       makeTask({ id: 'plan', title: 'Plan', plan_date: TODAY }), // plan alone never lands on the feed
+      // Began 4 days ago, still running → window overlap keeps it.
+      makeTask({ id: 'long', title: 'Long', scheduled_start: '2026-11-06T09:00:00+08:00', scheduled_end: '2026-11-11T18:00:00+08:00' }),
+      // Inverted interval is invalid and never emits.
+      makeTask({ id: 'bad', title: 'Bad', scheduled_start: '2026-11-10T15:00:00+08:00', scheduled_end: '2026-11-10T14:00:00+08:00' }),
     ];
     const { events } = toCalendar(tasks, NOW);
-    expect(events.map((e) => e.id)).toEqual(['in']);
+    expect(events.map((e) => e.id)).toEqual(['long', 'in']);
   });
 });
 
@@ -316,6 +326,99 @@ describe('/api/tasks', () => {
       expect(res.status).toBe(400);
     }
   });
+
+  it('null on a required column is a 400, not a DB-level 500', async () => {
+    const { env } = envWith({ tasks: [makeTask({ id: 't1', title: 'T' })] });
+    for (const body of [{ title: null }, { type: null }, { status: null }, { priority: null }]) {
+      const res = await jsonCall(env, 'https://pulse.test/api/tasks/t1', {
+        method: 'PATCH', headers: bearer, body: JSON.stringify(body),
+      });
+      expect(res.status).toBe(400);
+    }
+    // Empty-string title is rejected on both create and patch.
+    for (const method of ['POST', 'PATCH']) {
+      const url = method === 'POST' ? '/api/tasks' : '/api/tasks/t1';
+      const res = await jsonCall(env, `https://pulse.test${url}`, {
+        method, headers: bearer, body: JSON.stringify({ title: '  ' }),
+      });
+      expect(res.status).toBe(400);
+    }
+  });
+
+  it('instants require an explicit offset — bare dates and junk are rejected', async () => {
+    const { env } = envWith({ tasks: [makeTask({ id: 't1', title: 'T' })] });
+    for (const due of ['2026-11-10T09:00', '2026-11-10', '1', 'next friday']) {
+      const res = await jsonCall(env, 'https://pulse.test/api/tasks/t1', {
+        method: 'PATCH', headers: bearer, body: JSON.stringify({ due }),
+      });
+      expect(res.status).toBe(400);
+    }
+    for (const due of ['2026-11-10T09:00:00Z', '2026-11-10T09:00+08:00']) {
+      const res = await jsonCall(env, 'https://pulse.test/api/tasks/t1', {
+        method: 'PATCH', headers: bearer, body: JSON.stringify({ due }),
+      });
+      expect(res.status).toBe(200);
+    }
+  });
+
+  it('an explicit completed_at: null on create beats the auto-stamp', async () => {
+    const { env } = envWith();
+    const res = await jsonCall(env, 'https://pulse.test/api/tasks', {
+      method: 'POST',
+      headers: bearer,
+      body: JSON.stringify({ title: 'Backfill', done: true, completed_at: null }),
+    });
+    expect(res.status).toBe(201);
+    const task = await res.json();
+    expect(task.done).toBe(1);
+    expect(task.completed_at).toBeNull();
+  });
+
+  it('PATCH retries when a concurrent write moved updated_at', async () => {
+    // Simulate the race: the SELECT sees updated_at=A, then a concurrent
+    // write bumps it to B before our UPDATE — the optimistic WHERE misses,
+    // we re-read and land the patch on top of their write.
+    let raced = false;
+    const { env, tasks } = envWith(
+      { tasks: [makeTask({ id: 't1', title: 'T' })] },
+      {
+        beforeWrite(sql, rows) {
+          if (!raced && /^UPDATE tasks SET title/.test(sql)) {
+            raced = true;
+            rows[0]!.updated_at = '2099-01-01T00:00:00.000Z';
+            rows[0]!.notes = 'their note'; // concurrent append survives our patch
+          }
+        },
+      },
+    );
+    const res = await jsonCall(env, 'https://pulse.test/api/tasks/t1', {
+      method: 'PATCH', headers: bearer, body: JSON.stringify({ priority: 'P0' }),
+    });
+    expect(res.status).toBe(200);
+    const row = await res.json();
+    expect(row.priority).toBe('P0');
+    expect(row.notes).toBe('their note'); // not silently overwritten
+    expect(tasks[0]!.priority).toBe('P0');
+  });
+
+  it('PATCH returns 409 when the row keeps moving', async () => {
+    let n = 0;
+    const { env } = envWith(
+      { tasks: [makeTask({ id: 't1', title: 'T' })] },
+      {
+        beforeWrite(sql, rows) {
+          if (/^UPDATE tasks SET title/.test(sql)) {
+            rows[0]!.updated_at = `2099-01-01T00:00:00.0${++n}Z`;
+          }
+        },
+      },
+    );
+    // Every UPDATE attempt finds a newer updated_at, so both miss.
+    const res = await jsonCall(env, 'https://pulse.test/api/tasks/t1', {
+      method: 'PATCH', headers: bearer, body: JSON.stringify({ priority: 'P0' }),
+    });
+    expect(res.status).toBe(409);
+  });
 });
 
 // ── Route level: toggle + widget merge ─────────────────────────────────────
@@ -337,7 +440,7 @@ describe('POST /api/todo/toggle', () => {
     expect(tasks[0]).toMatchObject({ done: 1, status: 'Done', notes: 'old\ndid the thing' });
   });
 
-  it('404 on an unknown id; 400 on bad shape', async () => {
+  it('404 on an unknown id; 400 on bad shape — including a null body', async () => {
     const { env } = envWith();
     const missing = await jsonCall(env, 'https://pulse.test/api/todo/toggle', {
       method: 'POST',
@@ -345,12 +448,28 @@ describe('POST /api/todo/toggle', () => {
       body: JSON.stringify({ id: 'ghost', done: true }),
     });
     expect(missing.status).toBe(404);
-    const bad = await jsonCall(env, 'https://pulse.test/api/todo/toggle', {
+    for (const raw of ['null', '{"id":"x","done":"yes"}', '42']) {
+      const res = await call(env, 'https://pulse.test/api/todo/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...cookie },
+        body: raw,
+      });
+      expect(res.status).toBe(400);
+    }
+  });
+
+  it('a note on undo is ignored — notes only attach to completions', async () => {
+    const { env, tasks } = envWith({
+      tasks: [makeTask({ id: 't1', title: 'T', done: 1, status: 'Done', notes: 'kept' })],
+    });
+    const res = await jsonCall(env, 'https://pulse.test/api/todo/toggle', {
       method: 'POST',
       headers: cookie,
-      body: JSON.stringify({ id: 'x', done: 'yes' }),
+      body: JSON.stringify({ id: 't1', done: false, note: 'should not land' }),
     });
-    expect(bad.status).toBe(400);
+    expect(res.status).toBe(200);
+    expect(tasks[0]!.notes).toBe('kept');
+    expect(tasks[0]!.done).toBe(0);
   });
 });
 
