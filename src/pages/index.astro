@@ -48,11 +48,22 @@ import Layout from '../layouts/Layout.astro';
     </form>
   </dialog>
 
+  <dialog id="note-dialog" class="login-dialog" aria-labelledby="note-title">
+    <form id="note-form" class="login-card" method="dialog">
+      <h2 id="note-title">完成了，记一笔？</h2>
+      <p class="login-hint note-task" id="note-task"></p>
+      <input id="note-input" name="note" type="text" autocomplete="off" spellcheck="false" maxlength="500" placeholder="实际做了什么（可留空跳过）" aria-label="完成备注" />
+      <div class="login-actions">
+        <button type="button" id="note-skip" class="login-secondary">跳过</button>
+        <button type="submit" id="note-submit" class="login-primary" value="note">记下</button>
+      </div>
+    </form>
+  </dialog>
+
   <script>
     import { registry } from '../widgets/registry';
     import { generic } from '../widgets/generic';
     import { esc, timeAgo } from '../widgets/ui';
-    import { feishuSyncReason, isSoftFeishuSyncResult, shouldPostFeishuSync } from '../manual-sync';
     import type { Widget, WidgetDef } from '../widgets/types';
 
     const cardsEl = document.getElementById('cards')!;
@@ -271,9 +282,6 @@ import Layout from '../layouts/Layout.astro';
       renderSession();
     });
 
-    // Button-only Feishu sync. The 60s /api/widgets poll does not sync.
-    // Debounce matches the server cooldown. Signed-out clicks only reload widgets.
-    let lastManualSyncAt = 0;
     let refreshInflight = 0;
 
     // Client-side serialization is only a courtesy — POST /api/todo/toggle
@@ -294,6 +302,31 @@ import Layout from '../layouts/Layout.astro';
       if (check?.dataset.id) toggleTodo(check.dataset.id, check);
     });
 
+    // Completion note: checking an item opens a skippable prompt (Enter =
+    // 记下, Esc/backdrop/跳过 = close with no note). The note rides the same
+    // toggle POST so it lands in pending_writes atomically with the done
+    // write — no second call for a sync to split. Undo never prompts.
+    const noteDialog = document.getElementById('note-dialog') as HTMLDialogElement;
+    const noteInput = document.getElementById('note-input') as HTMLInputElement;
+    document.getElementById('note-skip')!.addEventListener('click', () => noteDialog.close());
+    noteDialog.addEventListener('click', (e) => {
+      if (e.target === noteDialog) noteDialog.close(); // backdrop click
+    });
+
+    function askCompletionNote(title: string): Promise<string | undefined> {
+      return new Promise((resolve) => {
+        document.getElementById('note-task')!.textContent = `「${title}」`;
+        noteInput.value = '';
+        noteDialog.returnValue = '';
+        noteDialog.addEventListener('close', () => {
+          const t = noteInput.value.trim();
+          resolve(noteDialog.returnValue === 'note' && t ? t : undefined);
+        }, { once: true });
+        noteDialog.showModal();
+        noteInput.focus();
+      });
+    }
+
     // Flip one item's done state: one POST, repaint the todo card from the
     // response. Signed out, it's a local-only flip (gone on refresh) with
     // a shake to hint it didn't persist.
@@ -311,15 +344,19 @@ import Layout from '../layouts/Layout.astro';
       const nowDone = !(lastToggle.get(id) ?? el.closest('.w-todo')?.classList.contains('is-done'));
       lastToggle.set(id, nowDone);
       todoMutationGen++;
-      toggleQueue = toggleQueue.then(() => doToggle(id, nowDone)).catch(() => {});
+      const title = el.closest('.w-todo')?.querySelector('.w-todo-title')?.textContent ?? '';
+      toggleQueue = toggleQueue.then(async () => {
+        const note = nowDone ? await askCompletionNote(title) : undefined;
+        return doToggle(id, nowDone, note);
+      }).catch(() => {});
     }
 
-    async function doToggle(id: string, nowDone: boolean) {
+    async function doToggle(id: string, nowDone: boolean, note?: string) {
       const res = await fetch('/api/todo/toggle', {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, done: nowDone }),
+        body: JSON.stringify({ id, done: nowDone, ...(note ? { note } : {}) }),
       });
       if (res.status === 401) {
         loggedIn = false;
@@ -369,37 +406,6 @@ import Layout from '../layouts/Layout.astro';
         h < 5 ? '夜深了' : h < 11 ? '早上好' : h < 13 ? '中午好' : h < 18 ? '下午好' : '晚上好';
     }
 
-    // Signed in: POST /api/feishu/sync, then reload widgets so the cards
-    // include that run. Overlap / cooldown / not_configured are not fatal —
-    // the spinner always stops and widgets still reload. Signed out, the
-    // button only reloads widgets (the board stays readable).
-    async function syncThenRefresh() {
-      await sessionReady;
-      const now = Date.now();
-      if (loggedIn && shouldPostFeishuSync(true, lastManualSyncAt, now)) {
-        lastManualSyncAt = now;
-        try {
-          const res = await fetch('/api/feishu/sync', {
-            method: 'POST',
-            credentials: 'same-origin',
-          });
-          let reason: string | undefined;
-          try {
-            reason = feishuSyncReason(await res.json());
-          } catch { /* non-JSON */ }
-          if (res.status === 401) {
-            loggedIn = false;
-            renderSession();
-          } else if (!isSoftFeishuSyncResult(res.status, reason)) {
-            console.warn('[pulse] feishu sync failed', res.status, reason ?? '');
-          }
-        } catch {
-          // Network error — still show the widgets D1 already has.
-        }
-      }
-      await refresh();
-    }
-
     // Opens iOS Calendar's subscribe sheet via the token-bearing webcal URL
     // the worker hands to signed-in sessions only (the cookie hides the token).
     document.getElementById('cal-sub')!.addEventListener('click', async () => {
@@ -418,7 +424,7 @@ import Layout from '../layouts/Layout.astro';
       refreshInflight++;
       btn.classList.add('spin');
       try {
-        await syncThenRefresh();
+        await refresh();
       } finally {
         refreshInflight--;
         if (refreshInflight === 0) {

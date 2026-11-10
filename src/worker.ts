@@ -1,9 +1,19 @@
 import { Hono } from 'hono';
 import type { MiddlewareHandler } from 'hono';
-import { runFeishuSync, runFeishuSyncAfterPendingWrite } from './feishu';
 import { toIcs, type IcsEvent } from './ics';
-import { parseTasksGate, tasksReadMode } from './tasks-schema';
-import { applyTodoToggle, type ToggleData } from './todo-toggle';
+import {
+  TASK_WIDGET_IDS,
+  boardTaskWidgets,
+  calendarWidget,
+  createTask,
+  deleteTask,
+  getTask,
+  listTasks,
+  parseTaskPatch,
+  todoWidget,
+  toggleTask,
+  updateTask,
+} from './tasks';
 import {
   bearerMatches,
   checkLoginRateLimit,
@@ -21,14 +31,6 @@ export interface Env {
   ASSETS: Fetcher;
   DB: D1Database;
   AGENT_TOKEN: string;
-  FEISHU_APP_ID?: string;
-  FEISHU_APP_SECRET?: string;
-  FEISHU_BASE_TOKEN?: string;
-  FEISHU_TABLE_ID?: string;
-  /** Unset keeps legacy Status behavior. See docs/TASKS_V2.md. */
-  TASKS_SCHEMA?: string;
-  FEISHU_FIELD_COMPLETED?: string;
-  FEISHU_FIELD_PLAN_DATE?: string;
 }
 
 interface WidgetRow {
@@ -140,20 +142,29 @@ function rowToWidget(row: WidgetRow) {
   };
 }
 
-// GET /api/widgets -> JSON array of all widgets (ordered by id).
+// GET /api/widgets -> JSON array: stored widget blobs plus the task-derived
+// cards computed live from the tasks table (todo / reminder / schedule).
+// Task widgets are never stored — nothing can go stale.
 app.get('/api/widgets', async (c) => {
-  const { results } = await c.env.DB.prepare(
-    'SELECT * FROM widgets ORDER BY id',
-  ).all<WidgetRow>();
-  return c.json(
-    (results ?? []).filter((r) => !HIDDEN_WIDGETS.has(r.id)).map(rowToWidget),
-  );
+  const [{ results }, taskWidgets] = await Promise.all([
+    c.env.DB.prepare('SELECT * FROM widgets ORDER BY id').all<WidgetRow>(),
+    boardTaskWidgets(c.env.DB),
+  ]);
+  const taskIds = new Set(taskWidgets.map((w) => w.id));
+  const blobs = (results ?? [])
+    .filter((r) => !HIDDEN_WIDGETS.has(r.id) && !taskIds.has(r.id))
+    .map(rowToWidget);
+  return c.json([...blobs, ...taskWidgets]);
 });
 
 app.get('/api/widgets/:id', async (c) => {
   const id = c.req.param('id');
   if (HIDDEN_WIDGETS.has(id)) {
     return c.json({ error: 'not_found', id }, 404);
+  }
+  if (TASK_WIDGET_IDS.has(id)) {
+    const w = (await boardTaskWidgets(c.env.DB)).find((x) => x.id === id);
+    return w ? c.json(w) : c.json({ error: 'not_found', id }, 404);
   }
   const row = await c.env.DB.prepare('SELECT * FROM widgets WHERE id = ?')
     .bind(id)
@@ -169,6 +180,10 @@ app.get('/api/widgets/:id', async (c) => {
 // Upserts the row; title falls back to existing row's title, then to :id.
 app.post('/api/widgets/:id', requireBearer, async (c) => {
   const id = c.req.param('id');
+  // Task-derived widgets are computed from the tasks table — push /api/tasks.
+  if (TASK_WIDGET_IDS.has(id)) {
+    return c.json({ error: 'managed_by_tasks', id }, 400);
+  }
 
   let body: { title?: unknown; data?: unknown; source?: unknown };
   try {
@@ -215,12 +230,12 @@ app.post('/api/widgets/:id', requireBearer, async (c) => {
   return c.json({ id, title, data: body.data, updated_at: now, source });
 });
 
-// POST /api/todo/toggle — flip one item's done state inside the Worker so the
-// read-modify-write happens in a single invocation (the old GET→flip→POST-blob
-// flow raced with the sync's own push and with rapid clicks).
-// Body: { "id": "<record_id>", "done": true|false }. Returns the updated widget.
+// POST /api/todo/toggle — flip one task's done state. A non-empty `note`
+// appends to the task's notes in the same UPDATE, so the reflection can't be
+// split from the completion. Returns the recomputed todo widget.
+// Body: { "id": "<task_id>", "done": true|false, "note"?: string }.
 app.post('/api/todo/toggle', requireUser, async (c) => {
-  let body: { id?: unknown; done?: unknown };
+  let body: { id?: unknown; done?: unknown; note?: unknown };
   try {
     body = await c.req.json();
   } catch {
@@ -230,58 +245,11 @@ app.post('/api/todo/toggle', requireUser, async (c) => {
     return c.json({ error: 'missing_field', field: 'id|done' }, 400);
   }
 
-  const row = await c.env.DB.prepare('SELECT * FROM widgets WHERE id = ?')
-    .bind('todo')
-    .first<WidgetRow>();
-  if (!row) return c.json({ error: 'not_found', id: 'todo' }, 404);
-
-  let data: {
-    items?: unknown;
-    done_items?: unknown;
-    pending_writes?: unknown;
-    pending_count?: number;
-    tasks_schema?: { capability?: unknown };
-    write_audit?: unknown;
-    [k: string]: unknown;
-  };
-  try {
-    data = JSON.parse(row.data);
-  } catch {
-    return c.json({ error: 'bad_widget_data' }, 500);
-  }
-
-  const gate = parseTasksGate(c.env.TASKS_SCHEMA);
-  const capability = data.tasks_schema?.capability === 'v2' ? 'v2' as const : 'unknown' as const;
-  const applied = applyTodoToggle(data as ToggleData, body.id, body.done, new Date().toISOString(), {
-    writeCompleted: (gate === 'compat' || gate === 'v2') && capability === 'v2',
-    readMode: tasksReadMode(gate, capability),
-  });
+  const note = typeof body.note === 'string' ? body.note.trim().slice(0, 500) : null;
+  const now = new Date();
+  const applied = await toggleTask(c.env.DB, body.id, body.done, note || null, now.toISOString());
   if (!applied.ok) return c.json({ error: applied.error, id: body.id }, 404);
-
-  const now = new Date().toISOString();
-  await c.env.DB.prepare(
-    "UPDATE widgets SET data = ?, updated_at = ?, source = 'manual' WHERE id = ?",
-  )
-    .bind(JSON.stringify(data), now, 'todo')
-    .run();
-
-  // Push the queued write to Feishu right away instead of waiting for the
-  // hourly cron — the response can't await it or the click feels frozen.
-  // A busy slot or the short cooldown waits (bounded) and tries once more
-  // so the new pending write is not stuck until the next hour.
-  c.executionCtx.waitUntil(
-    runFeishuSyncAfterPendingWrite(c.env).catch((err) => {
-      console.error('[feishu] toggle-triggered sync failed:', err?.message ?? err);
-    }),
-  );
-
-  return c.json({
-    id: 'todo',
-    title: row.title,
-    data,
-    updated_at: now,
-    source: 'manual',
-  });
+  return c.json(await todoWidget(c.env.DB, now));
 });
 
 // Parse a widget row's data blob, tolerating missing rows and bad JSON.
@@ -297,22 +265,24 @@ async function widgetData(env: Env, id: string): Promise<unknown> {
   }
 }
 
-// GET /api/calendar.ics — iCalendar feed of the hidden `calendar` widget
-// (falling back to `schedule`). iOS Calendar fetches cookieless on its own
-// refresh cycle, so the subscription URL carries ?token=<feed credential> —
-// derived from AGENT_TOKEN (see session.ts feedToken), it reads the feed and
-// nothing else. A signed-in browser session or Bearer works too.
+// GET /api/calendar.ics — iCalendar feed computed from the tasks table.
+// iOS Calendar fetches cookieless on its own refresh cycle, so the
+// subscription URL carries ?token=<feed credential> — derived from
+// AGENT_TOKEN (see session.ts feedToken), it reads the feed and nothing else.
+// A signed-in browser session or Bearer works too.
 app.get('/api/calendar.ics', async (c) => {
   const authed =
     userMatches(c.req.header('Authorization'), c.req.header('Cookie'), c.env.AGENT_TOKEN) ||
     tokenMatches(c.req.query('token') ?? '', await feedToken(c.env.AGENT_TOKEN));
   if (!authed) return c.json({ error: 'unauthorized' }, 401);
 
-  const data = (await widgetData(c.env, 'calendar')) ?? (await widgetData(c.env, 'schedule'));
-  const events = (data as { events?: IcsEvent[] } | null)?.events;
+  const [{ data: calData }, courseData] = await Promise.all([
+    calendarWidget(c.env.DB),
+    widgetData(c.env, 'courses'),
+  ]);
+  const events = (calData as { events?: IcsEvent[] }).events;
   // The `courses` row (XJTU timetable push) merges into the same feed — one
-  // subscription URL covers both Feishu slots and class meetings.
-  const courseData = await widgetData(c.env, 'courses');
+  // subscription URL covers both task time blocks and class meetings.
   const courseEvents = (courseData as { events?: IcsEvent[] } | null)?.events;
   const merged = [
     ...(Array.isArray(events) ? events : []),
@@ -340,11 +310,53 @@ app.get('/api/calendar-link', requireUser, async (c) => {
   return c.json({ feed, subscribe: feed.replace(/^https:/, 'webcal:') });
 });
 
-// POST /api/feishu/sync — run the Feishu bitable sync now (same as cron).
-app.post('/api/feishu/sync', requireUser, async (c) => {
-  const result = await runFeishuSync(c.env);
-  const status = result.ok || result.reason === 'not_configured' ? 200 : 502;
-  return c.json(result, status);
+// ── Tasks API (agent writes + board reads) ────────────────────────────────
+// GET    /api/tasks        → all task rows
+// POST   /api/tasks        → create { title, type?, status?, done?, due?,
+//                              priority?, plan_date?, scheduled_*?, notes?,
+//                              project?, tags?, calendar_event_id? }
+// GET    /api/tasks/:id    → one row
+// PATCH  /api/tasks/:id    → partial update (same fields; done 0→1 stamps
+//                            completed_at and lifts status to Done)
+// DELETE /api/tasks/:id    → remove
+app.get('/api/tasks', requireUser, async (c) => {
+  return c.json({ tasks: await listTasks(c.env.DB) });
+});
+
+app.post('/api/tasks', requireUser, async (c) => {
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'invalid_json' }, 400);
+  }
+  const { patch, error } = parseTaskPatch(body, false);
+  if (error) return c.json({ error }, 400);
+  const row = await createTask(c.env.DB, patch, new Date().toISOString());
+  return c.json(row, 201);
+});
+
+app.get('/api/tasks/:id', requireUser, async (c) => {
+  const row = await getTask(c.env.DB, c.req.param('id'));
+  return row ? c.json(row) : c.json({ error: 'item_not_found' }, 404);
+});
+
+app.patch('/api/tasks/:id', requireUser, async (c) => {
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'invalid_json' }, 400);
+  }
+  const { patch, error } = parseTaskPatch(body, true);
+  if (error) return c.json({ error }, 400);
+  const r = await updateTask(c.env.DB, c.req.param('id'), patch, new Date().toISOString());
+  return r.ok ? c.json(r.row) : c.json({ error: r.error }, 404);
+});
+
+app.delete('/api/tasks/:id', requireUser, async (c) => {
+  const ok = await deleteTask(c.env.DB, c.req.param('id'));
+  return ok ? c.json({ ok: true }) : c.json({ error: 'item_not_found' }, 404);
 });
 
 app.all('/api/*', (c) => {
@@ -373,17 +385,4 @@ app.all('*', (c) => {
   return c.env.ASSETS.fetch(c.req.raw);
 });
 
-export default {
-  fetch: app.fetch,
-  async scheduled(
-    _event: ScheduledEvent,
-    env: Env,
-    ctx: ExecutionContext,
-  ): Promise<void> {
-    ctx.waitUntil(
-      runFeishuSync(env).catch((err) => {
-        console.error('[feishu] unexpected error in scheduled run:', err?.message ?? err);
-      }),
-    );
-  },
-};
+export default { fetch: app.fetch };

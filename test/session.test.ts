@@ -18,12 +18,13 @@ function ctx() {
 function emptyDb() {
   const calls = { n: 0 };
   const db = {
-    prepare() {
+    prepare(sql: string) {
       calls.n++;
       const stmt = {
         async first() { return null; },
         async all() { return { results: [] as unknown[] }; },
-        async run() { return { meta: { changes: 1 } }; },
+        // Empty tasks table — UPDATE/DELETE match nothing; widget upserts do.
+        async run() { return { meta: { changes: /^(UPDATE|DELETE FROM) tasks/.test(sql) ? 0 : 1 } }; },
         bind() { return stmt; },
       };
       return stmt;
@@ -191,7 +192,7 @@ describe('POST /api/login and /api/logout', () => {
     const res = await login(env, '', '203.0.113.9');
     expect(res.status).toBe(401);
     expect(setCookies(res)).toHaveLength(0);
-    const bearer = await call('https://pulse.test/api/feishu/sync', env, {
+    const bearer = await call('https://pulse.test/api/tasks', env, {
       method: 'POST',
       headers: { Authorization: 'Bearer ' },
     });
@@ -241,11 +242,13 @@ describe('session probe and route policy', () => {
     const env = makeEnv();
     const res = await call('https://pulse.test/api/widgets', env);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual([]);
-    expect(env.calls.n).toBe(1);
+    // Empty DB → no blobs, but the three task-derived cards always compute.
+    const widgets = await res.json();
+    expect(widgets.map((w: { id: string }) => w.id)).toEqual(['todo', 'reminder', 'schedule']);
+    expect(env.calls.n).toBe(2); // widgets + tasks reads
   });
 
-  it('accepts cookie or bearer for toggle and sync, and bearer only for widget push', async () => {
+  it('accepts cookie or bearer for toggle and tasks, and bearer only for widget push', async () => {
     const env = makeEnv();
     const loggedIn = await login(env, 'secret', '203.0.113.21');
     const cookie = cookiePair(setCookies(loggedIn)[0]!);
@@ -262,7 +265,7 @@ describe('session probe and route policy', () => {
       headers: { 'Content-Type': 'application/json', Cookie: cookie },
       body: JSON.stringify({ id: 'r1', done: true }),
     });
-    // Auth passed; the empty D1 has no todo row.
+    // Auth passed; the empty D1 has no such task.
     expect(toggleCookie.status).toBe(404);
 
     const toggleBearer = await call('https://pulse.test/api/todo/toggle', env, {
@@ -276,32 +279,31 @@ describe('session probe and route policy', () => {
     });
     expect(toggleBearer.status).toBe(404);
 
-    const syncAnon = await call('https://pulse.test/api/feishu/sync', env, { method: 'POST' });
-    expect(syncAnon.status).toBe(401);
+    const tasksAnon = await call('https://pulse.test/api/tasks', env);
+    expect(tasksAnon.status).toBe(401);
 
-    const syncCookie = await call('https://pulse.test/api/feishu/sync', env, {
-      method: 'POST',
+    const tasksCookie = await call('https://pulse.test/api/tasks', env, {
       headers: { Cookie: cookie },
     });
-    expect(syncCookie.status).toBe(200);
-    expect(await syncCookie.json()).toEqual({ ok: false, reason: 'not_configured' });
+    expect(tasksCookie.status).toBe(200);
+    expect(await tasksCookie.json()).toEqual({ tasks: [] });
 
-    const pushCookie = await call('https://pulse.test/api/widgets/todo', env, {
+    const pushCookie = await call('https://pulse.test/api/widgets/stocks', env, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Cookie: cookie },
-      body: JSON.stringify({ data: { pending_count: 0, items: [] } }),
+      body: JSON.stringify({ data: { total_pnl: 0 } }),
     });
     expect(pushCookie.status).toBe(401);
 
     const writesBeforeBearer = env.calls.n;
-    const pushBearer = await call('https://pulse.test/api/widgets/todo', env, {
+    const pushBearer = await call('https://pulse.test/api/widgets/stocks', env, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: 'Bearer secret',
         Cookie: cookie,
       },
-      body: JSON.stringify({ data: { pending_count: 0, items: [] } }),
+      body: JSON.stringify({ data: { total_pnl: 0 } }),
     });
     expect(pushBearer.status).toBe(200);
     expect(env.calls.n).toBeGreaterThan(writesBeforeBearer);

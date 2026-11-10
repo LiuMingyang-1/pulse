@@ -1,11 +1,6 @@
 name = "pulse"
 main = "src/worker.ts"
 compatibility_date = "2025-09-23"
-# Next `wrangler deploy` must keep a remotely set TASKS_SCHEMA.
-# Without this, plain_text vars that are not in [vars] are deleted.
-# Secrets are kept either way. [vars] below are still uploaded and
-# overwrite the same names. Do not put TASKS_SCHEMA in [vars].
-keep_vars = true
 
 [assets]
 directory = "./dist"
@@ -17,18 +12,3 @@ binding = "DB"
 database_name = "pulse-db"
 database_id = "03fa6d2c-ff7e-4302-babb-189dc7242f7a"
 migrations_dir = "migrations"
-
-# Feishu bitable for the todo/reminder/schedule sync (not secret).
-# FEISHU_APP_ID / FEISHU_APP_SECRET are secrets: `wrangler secret put`.
-[vars]
-FEISHU_BASE_TOKEN = "KkKJbeFuaayQHysyH1Wc9frRnPe"
-FEISHU_TABLE_ID = "tbl9BFvxgcbQgJ5D"
-# Tasks cutover is off until docs/TASKS_V2.md says otherwise.
-# Do not set TASKS_SCHEMA here. Unset = legacy Status behavior.
-# Optional renames (names, never field ids):
-# FEISHU_FIELD_COMPLETED = "已完成"
-# FEISHU_FIELD_PLAN_DATE = "计划日期"
-# TASKS_SCHEMA = "legacy"   # legacy | compat | v2
-
-[triggers]
-crons = ["0 * * * *"]

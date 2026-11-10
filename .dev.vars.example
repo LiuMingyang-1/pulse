@@ -1,24 +1,17 @@
 # Dev-only secrets. Copy to .dev.vars (gitignored).
 # Production tokens are set via `wrangler secret put <NAME>`.
 #
-# This file is loaded by `wrangler dev` automatically, AND by
-# `scripts/sync-feishu.mjs` for any vars it needs (PULSE_TOKEN falls back to
-# AGENT_TOKEN if unset). One file = all local secrets for this project.
+# This file is loaded by `wrangler dev` automatically, AND by push scripts
+# like scripts/sync-courses.mjs (PULSE_TOKEN falls back to AGENT_TOKEN).
 
 AGENT_TOKEN=dev-token-change-me
 
-# Optional — only needed if you run scripts/sync-feishu.mjs locally.
-# LARK_APP_TOKEN and LARK_TABLE_ID come from your bitable URL:
-#   https://xxx.feishu.cn/base/<LARK_APP_TOKEN>?table=<LARK_TABLE_ID>&view=...
-# PULSE_URL points at your deployed worker (defaults to localhost:8787).
-# PULSE_TOKEN defaults to AGENT_TOKEN above; only set it if they differ.
-# PULSE_SOURCE tags pushed rows' `source` field (defaults to 'alma').
-LARK_APP_TOKEN=
-LARK_TABLE_ID=
+# Push scripts (sync-courses.mjs etc.) — PULSE_URL points at your deployed
+# worker (defaults to localhost:8787), PULSE_TOKEN defaults to AGENT_TOKEN,
+# PULSE_SOURCE tags pushed rows' `source` field.
 PULSE_URL=
 # PULSE_TOKEN=
 # PULSE_SOURCE=
 
-# Feishu sync inside the Worker (src/feishu.ts). Base/table ids live in wrangler.toml [vars].
-FEISHU_APP_ID=
-FEISHU_APP_SECRET=
+# Optional widget push keys (e.g. Finnhub for the stocks script).
+FINNHUB_API_KEY=

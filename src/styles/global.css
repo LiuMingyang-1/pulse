@@ -235,6 +235,15 @@
 .login-secondary { background: #eef2f7; color: var(--ink-2); }
 .login-primary:disabled { opacity: 0.55; }
 
+/* Completion-note dialog reuses .login-dialog/.login-card; only the task
+   line differs — long titles stay on one line. */
+.note-task {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
 .hello { margin: 14px 6px 22px; text-align: left; }
 .greeting {
   font-size: 44px;
@@ -401,8 +410,6 @@ button.w-check:focus-visible { outline: 2px solid var(--accent); outline-offset:
   border-width: 0 2px 2px 0;
   transform: rotate(45deg);
 }
-/* Feishu write-back failed — red ring until the next successful sync */
-.w-todo.is-failed .w-check { border-color: var(--down); }
 /* no-token tap hint: the flip won't persist */
 .w-check.w-shake { animation: w-shake 0.35s ease; }
 @keyframes w-shake {
